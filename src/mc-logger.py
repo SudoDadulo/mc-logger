@@ -536,7 +536,7 @@ async def req_mma(mc, contact: dict, frequency: int, sync_event: asyncio.Event) 
         await asyncio.sleep(frequency - loop_finish_time)
 
 
-async def send_login(contact: dict, password: str) -> EventType.LOGIN_SUCCESS | None:
+async def send_login(mc, contact: dict, password: str) -> EventType.LOGIN_SUCCESS | None:
 
     print("Logging in...")
 
@@ -581,23 +581,23 @@ async def send_logout(mc, contact: dict) -> EventType.ERROR | EventType.OK:
     logout  = await mc.commands.send_logout(contact)
 
     # If login failed retry request 3 times
-    if login == EventType.ERROR:
+    if logout == EventType.ERROR:
         print("Login failed!")
 
         for attempt in range(3):
 
             print("Retrying login...")
 
-            login = await mc.commands.send_logout(contact)
+            logout = await mc.commands.send_logout(contact)
 
             # If login success
-            if login == EventType.OK:
+            if logout == EventType.OK:
                 break
 
             print("Login failed!", end=" ")
             print(f"(Attempt: {attempt + 1}/3)")
 
-    return login
+    return logout
 
 def search_contacts(mc, query: str) -> dict | None:
 
@@ -698,13 +698,19 @@ async def main():
         if args.repeater:
 
             # Send login to repeater
-            login = await send_login(contact, args.password)
+            login = await send_login(mc, contact, args.password)
 
             # End the program when login failed
             if login is None:
+                print("The password you entered may be incorrect or the repeater may be unreachable.")
                 return
 
             print("Success logging in!")
+
+        # Exit the program when there is nothing to do
+        if not args.listen and not args.write_log and not args.write_csv:
+            print("Nothing to do.")
+            return
 
         # * Construct task list, data to request list and sync events list
 
@@ -716,10 +722,6 @@ async def main():
 
         # This list will be passed to idle() function to track which tasks are finished
         sync_events = []
-
-        if not args.listen and not args.write_log and not args.write_csv:
-            print("Nothing to do.")
-            return
 
         #*LISTEN BRANCH
 
@@ -976,16 +978,16 @@ async def main():
 
     finally:
 
-        #if args.repeater:
+        if args.repeater:
 
             # Send logout
-            #logout = await send_logout(mc, contact)
+            logout = await send_logout(mc, contact)
 
-            #if logout is EventType.ERROR:
-            #    print("Still logged in!")
+            if logout is EventType.ERROR:
+                print("Still logged in!")
 
-            #if logout is EventType.OK:
-            #    print("Logged out successfully.")
+            if logout is EventType.OK:
+                print("Logged out successfully.")
 
         # Diconnect cleanly if device is connected
         if mc.is_connected:
