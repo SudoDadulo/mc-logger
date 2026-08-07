@@ -536,6 +536,90 @@ async def req_mma(mc, contact: dict, frequency: int, sync_event: asyncio.Event) 
         await asyncio.sleep(frequency - loop_finish_time)
 
 
+async def send_login(contact: dict, password: str) -> EventType.LOGIN_SUCCESS | None:
+
+    print("Logging in...")
+
+    # Send login request and wait for response
+    login  = await mc.commands.send_login_sync(
+        contact, password, timeout=0, min_timeout=10
+        )
+
+    # If login failed retry request 3 times
+    if login  is None:
+        print("Login failed!")
+
+        for attempt in range(3):
+
+            print("Retrying login...")
+
+            login = await mc.commands.send_login_sync(
+                contact, password, timeout=0, min_timeout=10
+                )
+
+            # If login success
+            if login is not None:
+                break
+
+            print("Login failed!", end=" ")
+            print(f"(Attempt: {attempt + 1}/3)")
+
+    return login
+
+
+async def send_logout(mc, contact: dict) -> EventType.ERROR | EventType.OK:
+
+    # When the --disconnect-while-idle flag is active the connected device over serial
+    # cant send logout request so we have to connect to send it
+    if not mc.is_connected:
+        await mc.connect()
+        print("Connected just to send logout to repeater.")
+
+    print("Logging out...")
+
+    # Send login request and wait for response
+    logout  = await mc.commands.send_logout(contact)
+
+    # If login failed retry request 3 times
+    if login == EventType.ERROR:
+        print("Login failed!")
+
+        for attempt in range(3):
+
+            print("Retrying login...")
+
+            login = await mc.commands.send_logout(contact)
+
+            # If login success
+            if login == EventType.OK:
+                break
+
+            print("Login failed!", end=" ")
+            print(f"(Attempt: {attempt + 1}/3)")
+
+    return login
+
+def search_contacts(mc, query: str) -> dict | None:
+
+    # Try to find contact by name and return it
+    by_name = mc.get_contact_by_name(query)
+
+    if by_name is not None:
+        contact: dict = by_name
+        
+        return contact
+
+    # Try to find contact by public key prefix and return it
+    by_key = mc.get_contact_by_key_prefix(query)
+
+    if by_key is not None:
+        contact: dict = by_key
+
+        return contact
+
+    # If contact was not found
+    return None
+
 async def main():
 
     # These values are difficult to access cleanly so I made them global
@@ -548,71 +632,45 @@ async def main():
     global mma_log_path
     global mma_csv_path
 
-    # Connect to device
     if not args.quiet:
         print(f"Connecting to '{args.port}'...")
 
+    # Connect to the device
     mc = await MeshCore.create_serial(args.port, args.baudrate, debug=args.debug)
-
     print("Device connected!")
 
     try:
 
-        # * Decide what to monitor
-
-        # Gets contacts if -c/--companion or -r/--repeater
+        # Make sure that the device has ANY contacts before searching
         if not await mc.ensure_contacts():
             print("Couldn't fetch contacts.")
             return
 
-        # set what type of device to find in contacts
+        # Set the contacts search query for a companion
         if args.companion:
 
+            query = args.companion
+
             if not args.quiet:
-                print(f"Finding companion in contacts using '{args.companion}' ...")
+                print(f"Finding companion in contacts using '{query}' ...")
 
-            find_contact = args.companion
-
+        # Set the contacts search query for a repeater
         if args.repeater:
 
-            if not args.quiet:
-                print(f"Finding repeater in contacts using '{args.repeater}' ...")
-
-            find_contact = args.repeater
-
-        # by_name/by_key is a public key when assigned, but you can get other values like the "adv_name"
-        by_name: dict | None = mc.get_contact_by_name(find_contact)
-        by_key: dict | None = mc.get_contact_by_key_prefix(find_contact)
-
-        if by_name is not None:
+            query = args.repeater
 
             if not args.quiet:
-                if args.companion:
-                    print(f"Companion '{by_name["adv_name"]}' found!")
+                print(f"Finding repeater in contacts using '{query}' ...")
 
-                if args.repeater:
-                    print(f"Repeater '{by_name["adv_name"]}' found!")
-
-            # Sets contact var to be the public key for sending requests later
-            contact = by_name
-
-        elif by_key is not None:
-
-            if not args.quiet:
-                if args.companion:
-                    print(f"Companion '{by_key["adv_name"]}' found!")
-
-                if args.repeater:
-                    print(f"Repeater '{by_key["adv_name"]}' found!")
-
-            # Sets contact var to be the public key for sending requests later
-            contact = by_key
+        # Search the contacts for the contact search query
+        # Assign it to contact for sending requests
+        contact = search_contacts(mc, query)
 
         # If the contact wasn't found by name or key
-        else:
+        if contact is None:
 
             print(
-                f"Couldn't find companion/repeater in contacts using '{find_contact}'."
+                f"Couldn't find companion/repeater in contacts using '{query}'."
             )
             print("Print available contacts?", end=" ")
 
@@ -624,7 +682,8 @@ async def main():
 
                     if strtobool(input("(Y/n) "), default_val=True):
                         print("\nAvailable contacts:")
-                        for contact in contacts:
+                        
+                        for contact in contacts.values():
                             print(f"{contact['adv_name']}: {contact['public_key']}")
 
                     break
@@ -632,23 +691,17 @@ async def main():
                 except ValueError:
                     print("Please choose a valid option.", end=" ")
 
-            # Ends the program because no contacts found using user input.
+            # Ends the program because no contacts found using the search query
             return
 
-        # Companion, no login branch needed
-
-        # Repeater login branch
+        # Login to repeater
         if args.repeater:
 
-            print("Sending login request...")
+            # Send login to repeater
+            login = await send_login(contact, args.password)
 
-            # Send login request
-            login_event = await mc.commands.send_login_sync(
-                contact, args.password, timeout=0, min_timeout=10
-            )
-
-            if login_event is None:
-                print("Login failed!")
+            # End the program when login failed
+            if login is None:
                 return
 
             print("Success logging in!")
@@ -923,37 +976,16 @@ async def main():
 
     finally:
 
-        if args.repeater:
+        #if args.repeater:
 
-            # When the --disconnect-while-idle is active the connected device over serial
-            # cant send logout request so we have to connect to send it
-            if not mc.is_connected:
-                await mc.connect()
-                print("Connected to send logout to repeater.")
+            # Send logout
+            #logout = await send_logout(mc, contact)
 
-            logout_event = await mc.commands.send_logout(contact)
+            #if logout is EventType.ERROR:
+            #    print("Still logged in!")
 
-            if logout_event.type == EventType.ERROR:
-
-                print("Logout failed!")
-
-                for attempt in range(3):
-
-                    print(f"Retrying logout ...")
-
-                    logout_event = await mc.commands.send_logout(contact)
-
-                    if logout_event == EventType.OK:
-                        break
-
-                    print("Logout failed!", end=" ")
-                    print(f"(Attempt: {attempt + 1}/3)")
-
-            if logout_event == EventType.ERROR:
-                print("Failed to logout! Still logged in!")
-
-            if logout_event == EventType.OK:
-                print("Logged out succesfully!")
+            #if logout is EventType.OK:
+            #    print("Logged out successfully.")
 
         # Diconnect cleanly if device is connected
         if mc.is_connected:
@@ -1225,8 +1257,8 @@ if __name__ == "__main__":
         print("\nProgram cancelled by user.")
     except asyncio.exceptions.CancelledError:
         print("\nProgram cancelled by user.")
-    except Exception as e:
-        print(f"Error: {e}")
+    #except Exception as e:
+        #print(f"Error: {e}")
 
     finally:
 
