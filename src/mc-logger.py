@@ -67,7 +67,7 @@ def strtobool(val: str, default_val: bool | None = None) -> bool:
 
 
 # * FILE MANIPULATION
-def create_file(file_type: str, data: str, path: str) -> tuple[str, Path]:
+def create_file(file_type: str, data: str, path: str) -> [Path]:
     """
     Try to create file on path with naming scheme: 'mc_{data}_log_yyyymmdd_HHMMSS.{file_type}'.
 
@@ -114,7 +114,7 @@ def create_file(file_type: str, data: str, path: str) -> tuple[str, Path]:
             except ValueError:
                 print("Please choose a valid option. ")
 
-    return file_name, abs_file_path
+    return abs_file_path
 
 
 def write_line(data: dict, timestamp: str, path: Path) -> None:
@@ -535,7 +535,7 @@ async def req_mma(mc, contact: dict, frequency: int, sync_event: asyncio.Event) 
         loop_finish_time = time.monotonic() - loop_start_time
         await asyncio.sleep(frequency - loop_finish_time)
 
-
+# * LOGIN AND LOGOUT
 async def send_login(mc, contact: dict, password: str) -> EventType.LOGIN_SUCCESS | None:
 
     print("Logging in...")
@@ -599,23 +599,37 @@ async def send_logout(mc, contact: dict) -> EventType.ERROR | EventType.OK:
 
     return logout
 
-def search_contacts(mc, query: str) -> dict | None:
+# * SEARCH CONTACTS
+async def search_contacts(mc, query: str) -> dict | None:
 
-    # Try to find contact by name and return it
+    # Try to find contact by name and by pubkey prefix
     by_name = mc.get_contact_by_name(query)
-
-    if by_name is not None:
-        contact: dict = by_name
-        
-        return contact
-
-    # Try to find contact by public key prefix and return it
     by_key = mc.get_contact_by_key_prefix(query)
 
-    if by_key is not None:
-        contact: dict = by_key
+    contact: dict | None = by_name or by_key
 
-        return contact
+    # If the contact wasn't found by name or key
+    print(
+        f"Couldn't find companion/repeater in contacts using '{query}'."
+    )
+    print("Print available contacts?", end=" ")
+
+    response = await mc.commands.get_contacts()
+    contacts = response.payload
+
+    while True:
+        try:
+
+            if strtobool(input("(Y/n) "), default_val=True):
+                print(f"\nAvailable contacts: {len(contacts)}")
+                        
+                for contact in contacts.values():
+                    print(f"{contact['adv_name']}: {contact['public_key']}")
+
+            break
+
+        except ValueError:
+            print("Please choose a valid option.", end=" ")
 
     # If contact was not found
     return None
@@ -646,52 +660,19 @@ async def main():
             print("Couldn't fetch contacts.")
             return
 
-        # Set the contacts search query for a companion
-        if args.companion:
+        # Assigns the advert name or key to the variable
+        # This works because one of them is always None
+        query = args.companion or args.repeater
 
-            query = args.companion
-
-            if not args.quiet:
-                print(f"Finding companion in contacts using '{query}' ...")
-
-        # Set the contacts search query for a repeater
-        if args.repeater:
-
-            query = args.repeater
-
-            if not args.quiet:
-                print(f"Finding repeater in contacts using '{query}' ...")
+        if not args.quiet:
+            print(f"Finding companion/repeater in contacts using '{query}' ...")
 
         # Search the contacts for the contact search query
         # Assign it to contact for sending requests
-        contact = search_contacts(mc, query)
+        contact = await search_contacts(mc, query)
 
-        # If the contact wasn't found by name or key
+        # End the program because no contacts found using the search query
         if contact is None:
-
-            print(
-                f"Couldn't find companion/repeater in contacts using '{query}'."
-            )
-            print("Print available contacts?", end=" ")
-
-            response = await mc.commands.get_contacts()
-            contacts = response.payload
-
-            while True:
-                try:
-
-                    if strtobool(input("(Y/n) "), default_val=True):
-                        print("\nAvailable contacts:")
-                        
-                        for contact in contacts.values():
-                            print(f"{contact['adv_name']}: {contact['public_key']}")
-
-                    break
-
-                except ValueError:
-                    print("Please choose a valid option.", end=" ")
-
-            # Ends the program because no contacts found using the search query
             return
 
         # Login to repeater
@@ -707,7 +688,7 @@ async def main():
 
             print("Success logging in!")
 
-        # Exit the program when there is nothing to do
+        # Exit the program if there is nothing to do
         if not args.listen and not args.write_log and not args.write_csv:
             print("Nothing to do.")
             return
@@ -717,34 +698,33 @@ async def main():
         # This list used to provide list of tasks to asyncio.gather()
         list_of_tasks = []
 
-        # This is a list to determine to which event to subscribe to using meshcore.subscribe()
-        data_to_request = []
-
         # This list will be passed to idle() function to track which tasks are finished
         sync_events = []
 
-        #*LISTEN BRANCH
+        # This is a list to determine to which event to subscribe to using meshcore.subscribe()
+        data_to_request = []
 
-        if "telemetry" in args.listen:
+        if "telemetry" in (args.listen or args.write_log or args.write_csv):
 
             data_to_request.append("telemetry")
 
-        if "status" in args.listen:
+        if "status" in (args.listen or args.write_log or args.write_csv):
 
             data_to_request.append("status")
 
-        if "mma" in args.listen:
+        if "mma" in (args.listen or args.write_log or args.write_csv):
 
             data_to_request.append("mma")
 
-        #* LOG BRANCH
+        # Remove duplicates from data_to_request
+        data_to_request = list(set(data_to_request))
+
+        #* CREATE LOG FILES
 
         if "telemetry" in args.write_log:
 
-            data_to_request.append("telemetry")
-
             # gets the csv name and the telemetry csv path (global)
-            telemetry_log_name, telemetry_log_path = create_file(
+            telemetry_log_path = create_file(
                 "log", "telemetry", args.path
             )
 
@@ -756,9 +736,7 @@ async def main():
 
         if "status" in args.write_log:
 
-            data_to_request.append("status")
-
-            status_log_name, status_log_path = create_file(
+            status_log_path = create_file(
                 "log", "status", args.path
             )
 
@@ -770,9 +748,7 @@ async def main():
 
         if "mma" in args.write_log:
 
-            data_to_request.append("mma")
-
-            mma_log_name, mma_log_path = create_file("log", "mma", args.path)
+            mma_log_path = create_file("log", "mma", args.path)
 
             if not args.quiet:
                 print("Created Min/Max/Avg log file.")
@@ -780,14 +756,12 @@ async def main():
             if args.verbose:
                 print(f"Path to Min/Max/Avg log file: '{mma_log_path}'")
 
-        #* CSV BRANCH
+        #* CREATE CSV FILES
 
         if "telemetry" in args.write_csv:
 
-            data_to_request.append("telemetry")
-
             # gets the telemetry csv name and the telemetry csv path (global)
-            telemetry_csv_name, telemetry_csv_path = create_file(
+            telemetry_csv_path = create_file(
                 "csv", "telemetry", args.path
             )
 
@@ -799,10 +773,8 @@ async def main():
 
         if "status" in args.write_csv:
 
-            data_to_request.append("status")
-
             # gets the status csv name and the status csv path (global)
-            status_csv_name, status_csv_path = create_file(
+            status_csv_path = create_file(
                 "csv", "status", args.path
             )
 
@@ -814,19 +786,14 @@ async def main():
 
         if "mma" in args.write_csv:
 
-            data_to_request.append("mma")
-
             # gets the mma csv name and the mma csv path (global)
-            mma_csv_name, mma_csv_path = create_file("csv", "mma", args.path)
+            mma_csv_path = create_file("csv", "mma", args.path)
 
             if not args.quiet:
                 print("Created Min/Max/Avg csv file.")
 
             if args.verbose:
                 print(f"Path to Min/Max/Avg csv file: '{mma_csv_path}'")
-
-        # Remove duplicates from data_to_request
-        data_to_request = list(set(data_to_request))
 
         #* FIND SENSORS AND SUBSCRIBE TO EVENTS
 
@@ -978,18 +945,21 @@ async def main():
 
     finally:
 
-        if args.repeater:
+        # Repeater logout
+        # When contact is None, no contact was found don't try loggingout
+        if args.repeater and contact is not None:
 
             # Send logout
             logout = await send_logout(mc, contact)
 
+            # Failed to logout even after retrying 3 times
             if logout is EventType.ERROR:
                 print("Still logged in!")
 
             if logout is EventType.OK:
                 print("Logged out successfully.")
 
-        # Diconnect cleanly if device is connected
+        # Diconnect cleanly, only if device is connected
         if mc.is_connected:
             await mc.disconnect()
             print("\nDisconnected from device.")
