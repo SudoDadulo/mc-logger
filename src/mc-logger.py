@@ -24,7 +24,7 @@ class MeshCoreLogger:
         # Store tasks
         self.tasks = []
 
-        # Store sync events
+        # Store sync events UNUSED
         self.events = []
 
         # Store output paths as e.g. ()"telemetry", "csv"): path
@@ -41,6 +41,36 @@ class MeshCoreLogger:
 
     def get_path(self, metric: str, file_ext: str) -> Path | None:
         return self.output_paths.get((metric, file_ext))
+
+    def print_file_stats(self):
+        
+        # If no files written
+        if not self.output_paths:
+            return
+
+        print("\nFile statistics:")
+        for (metric, ext), path in self.output_paths.items():
+
+            try:
+                
+                line_count = 0
+                with open(path, "r") as file:
+
+                    for line_count, _ in enumerate(file, start=1):
+                        pass  # Just iterate
+
+                # Don't count header
+                if ext == "csv": 
+                        
+                    # Make sure that row_count is never < 0
+                    row_count = max(0, line_count - 1)
+                    print(f"  {metric.capitalize()} CSV: wrote {row_count} rows")
+                    
+                else:
+                    print(f"  {metric.capitalize()} Log: wrote {line_count} lines")
+
+            except OSError as e:
+                print(f"  Error reading {path}: {e}")
 
     async def on_telemetry(self, event: EventType.TELEMETRY_RESPONSE) -> None:
         """
@@ -128,18 +158,22 @@ class MeshCoreLogger:
             print(f"Duplicate flood: {status['flood_dups']}")
 
         if "status" in self.args.write_log:
-            write_line(status, timestamp, status_log_path)
+            write_line(
+                status, timestamp, self.get_path("status", "log")
+                )
 
             if not self.args.quiet:
                 print("\nStatus data written to log file.")
 
         if "status" in self.args.write_csv:
-            write_row(status, timestamp, status_csv_path)
+            write_row(
+                status, timestamp, self.get_path("status", "csv")
+                )
 
             if not self.args.quiet:
                 print("\nStatus data written to csv file.")
 
-    async def on_mma(event: EventType.MMA_RESPONSE) -> None:
+    async def on_mma(self, event: EventType.MMA_RESPONSE) -> None:
         """
         Handle a Min/Max/Avg response event.
 
@@ -159,7 +193,7 @@ class MeshCoreLogger:
         end_timestamp = dt.datetime.now().timestamp()
 
         # Convert the frequency argument to a timedelta object
-        delta_timestamp = dt.timedelta(seconds=args.frequency)
+        delta_timestamp = dt.timedelta(seconds=self.args.frequency)
 
         start_timestamp = end_timestamp - delta_timestamp
 
@@ -183,9 +217,11 @@ class MeshCoreLogger:
                 print(f"  Avg: {mma['avg']}")
 
         if "mma" in self.args.write_log:
-            write_line(event.payload, timestamp_interval, mma_log_path)
+            write_line(
+                event.payload, timestamp_interval, self.get_path("mma", "log")
+                )
 
-            if not args.quiet:
+            if not self.args.quiet:
                 print("\nMin/Max/Avg data written to log file.")
 
         if "mma" in self.args.write_csv:
@@ -199,7 +235,9 @@ class MeshCoreLogger:
                 mma_sensor_values.update({f"{sensor_type}_max": mma_sensor['max']})
                 mma_sensor_values.update({f"{sensor_type}_avg": mma_sensor['avg']})
 
-            write_row(mma_sensor_values, timestamp_interval, mma_csv_path)
+            write_row(
+                mma_sensor_values, timestamp_interval, self.get_path("mma", "csv")
+                )
 
             if not self.args.quiet:
                 print("\nMin/Max/Avg data written to csv file.")
@@ -794,6 +832,9 @@ async def search_contacts(mc, query: str) -> dict | None:
     contact: dict | None = by_name or by_key
 
     if contact is not None:
+        print(
+            f"Found {contact['adv_name']!r} in contacts! (public key prefix: {contact['public_key'][:12]!r})"
+        )
         return contact
 
     # If the contact wasn't found by name or key
@@ -824,6 +865,9 @@ async def search_contacts(mc, query: str) -> dict | None:
 
 async def main():
 
+    # To avoid UnboundLocalError if the user quits too early
+    mc_logger = None
+
     if not args.quiet:
         print(f"Connecting to '{args.port}'...")
 
@@ -853,6 +897,9 @@ async def main():
         if contact is None:
             return
 
+        # * Instantiate the MeshCoreLogger class
+        mc_logger = MeshCoreLogger(mc, contact, args)
+
         # Login to repeater
         if args.repeater:
 
@@ -864,16 +911,15 @@ async def main():
                 print("The password you entered may be incorrect or the repeater may be unreachable.")
                 return
 
+            # Set state as logged in
+            mc_logger.is_logged_in = True
+
             print("Success logging in!")
 
         # Exit the program if there is nothing to do
         if not args.listen and not args.write_log and not args.write_csv:
             print("Nothing to do.")
             return
-
-        # * Instantiate the MeshCoreLogger class
-
-        mc_logger = MeshCoreLogger(mc, contact, args)
 
         # Add metrics to the list of metrics to collect
         for metric in ["telemetry", "status", "mma"]:
@@ -989,7 +1035,7 @@ async def main():
                 print("Finding sensors that support Min/Max/Avg data output...")
 
             end_time = int(time.time())
-            start_time = start_time = end_time - 3600
+            start_time = end_time - 3600
 
             mma = await mc.commands.req_mma_sync(
                 contact, start=start_time, end=end_time, min_timeout=15.0
@@ -1048,25 +1094,18 @@ async def main():
 
     finally:
 
-        # Repeater logout
-        # When contact is None, no contact was found don't try loggingout
-        if args.repeater and contact is not None:
-
-            # Send logout
-            logout = await send_logout(mc, contact)
-
-            # Failed to logout even after retrying 3 times
-            if logout is EventType.ERROR:
-                print("Still logged in!")
-
-            if logout is EventType.OK:
-                print("Logged out successfully.")
+        if mc_logger is not None:
+            
+            if mc_logger.is_logged_in:
+                await send_logout(mc, contact)
 
         # Diconnect cleanly, only if device is connected
         if mc.is_connected:
             await mc.disconnect()
             print("\nDisconnected from device.")
 
+        if mc_logger is not None:
+            mc_logger.print_file_stats()
 
 if __name__ == "__main__":
 
@@ -1328,10 +1367,10 @@ if __name__ == "__main__":
 
     try:
         asyncio.run(main())
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
         print("\nProgram cancelled by user.")
-    except asyncio.exceptions.CancelledError:
-        print("\nProgram cancelled by user.")
+
+    # COMMENT OUT WHEN DEBUGGING
     #except Exception as e:
         #print(f"Error: {e}")
 
@@ -1346,6 +1385,7 @@ if __name__ == "__main__":
         print(f"Runtime: {prog_run_time.days} days, {prog_run_time.seconds} seconds")
 
         # Needs to be inside a try block if the paths of the files weren't defined it will raise a NameError and do nothing
+        # TODO Use the mc_logger class
         try:
 
             # LOG FILE STATISTICS
