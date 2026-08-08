@@ -10,22 +10,199 @@ from pathlib import Path
 
 from meshcore import MeshCore, EventType
 
-# * GLOBAL VARIABLES
+class MeshCoreLogger:
 
-"""
-I don't know how else to get these variables to the event handlers, so instead I made them global.
-They are declared as global in main()
+    def __init__(self, mc: MeshCore, contact: dict, args: argparse.Namespace):
+        self.mc = mc
+        self.contact = contact
+        self.args = args
+        self.is_logged_in = False
 
-telemetry_log_path
-telemetry_csv_path
+        # Store metrics
+        self.metrics = []
 
-status_log_path
-status_csv_path
+        # Store tasks
+        self.tasks = []
 
-mma_log_path
-mma_csv_path
-"""
+        # Store sync events
+        self.events = []
 
+        # Store output paths as e.g. ()"telemetry", "csv"): path
+        self.output_paths: dict[tuple[str, str], Path] = {}
+    
+    def add_metric(self, metric) -> None:
+        self.metrics.append(metric)
+
+    def add_task(self, task) -> None:
+        self.tasks.append(task)
+
+    def store_path(self, metric: str, file_ext: str, path: Path) -> None:
+        self.output_paths[(metric, file_ext)] = path
+
+    def get_path(self, metric: str, file_ext: str) -> Path | None:
+        return self.output_paths.get((metric, file_ext))
+
+    async def on_telemetry(self, event: EventType.TELEMETRY_RESPONSE) -> None:
+        """
+        Handle a telemetry response event.
+
+        Args:
+            event (EventType.TELEMETRY_RESPONSE): Telemetry event data
+
+        Returns:
+            None
+        """
+        if not self.args.quiet:
+            print("\nSuccess requesting telemetry!")
+
+        # Get the lpp formatted data
+        lpp_data = event.payload["lpp"]
+
+        timestamp = dt.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+
+        # Extract sensor types and corresponding values
+        sensors = [sensor["type"] for sensor in lpp_data]
+        values = [value["value"] for value in lpp_data]
+
+        # Combine lists into a dict
+        sensor_values = dict(zip(sensors, values))
+
+        if "telemetry" in self.args.listen:
+
+            print(f"\nReceived telemetry at '{timestamp}':\n")
+
+            for sensor in sensor_values:
+                print(f"{sensor} = {sensor_values[sensor]}")
+
+        if "telemetry" in self.args.write_log:
+            write_line(event.payload, timestamp, self.get_path("telemetry", "log"))
+
+            if not self.args.quiet:
+                print("\nTelemetry data written to log file.")
+
+        if "telemetry" in self.args.write_csv:
+            write_row(sensor_values, timestamp, self.get_path("telemetry", "csv"))
+
+            if not self.args.quiet:
+                print("\nTelemetry data written to csv file.")
+
+    async def on_status(self, event: EventType.STATUS_RESPONSE) -> None:
+        """
+        Handle a status response event.
+
+        Args:
+            event (EventType.STATUS_RESPONSE): Status event data
+
+        Returns:
+            None
+        """
+        if not self.args.quiet:
+            print("\nSuccess requesting status!")
+
+        # Assing the payload to var
+        status = event.payload
+
+        # Get timestamp
+        timestamp = dt.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+
+        if "status" in self.args.listen:
+
+            print(f"\nReceived status at '{timestamp}':\n")
+
+            print(f"Battery: {status['bat']} mV")
+            print(f"Last RSSI: {status['last_rssi']} dBm")
+            print(f"Last SNR: {status['last_snr']} dB")
+            print(f"Noise Floor: {status['noise_floor']} dBm")
+            print(f"Uptime: {status['uptime']} seconds")
+            print(f"TX Queue: {status['tx_queue_len']} packets")
+            print(f"Packets Received: {status['nb_recv']}")
+            print(f"Packets Sent: {status['nb_sent']}")
+            print(f"Airtime: {status['airtime']} ms")
+            print(f"RX Airtime: {status['rx_airtime']} ms")
+            print(f"Flood packets sent: {status['sent_flood']}")
+            print(f"Direct packets sent: {status['sent_direct']}")
+            print(f"Flood packets received: {status['recv_flood']}")
+            print(f"Direct packets received: {status['recv_direct']}")
+            print(f"Full buffer events: {status['full_evts']}")
+            print(f"Duplicate direct: {status['direct_dups']}")
+            print(f"Duplicate flood: {status['flood_dups']}")
+
+        if "status" in self.args.write_log:
+            write_line(status, timestamp, status_log_path)
+
+            if not self.args.quiet:
+                print("\nStatus data written to log file.")
+
+        if "status" in self.args.write_csv:
+            write_row(status, timestamp, status_csv_path)
+
+            if not self.args.quiet:
+                print("\nStatus data written to csv file.")
+
+    async def on_mma(event: EventType.MMA_RESPONSE) -> None:
+        """
+        Handle a Min/Max/Avg response event.
+
+        Args:
+            event (EventType.MMA_RESPONSE): Min/Max/Avg event data
+
+        Returns:
+            None
+        """
+        if not self.args.quiet:
+            print("\nSuccess requesting Min/Max/Avg!")
+
+        # assing the payload to var
+        mma_data = event.payload["mma_data"]
+
+        # Get now timestamp
+        end_timestamp = dt.datetime.now().timestamp()
+
+        # Convert the frequency argument to a timedelta object
+        delta_timestamp = dt.timedelta(seconds=args.frequency)
+
+        start_timestamp = end_timestamp - delta_timestamp
+
+        # ISO-8601 format for time intervals in log and csv
+        # 2007-03-01T13:00:00/2008-05-11T15:30:00
+        timestamp_interval = f"{start_timestamp.strftime('%Y-%m-%dT%H:%M:%S')}/{end_timestamp.strftime('%Y-%m-%dT%H:%M:%S')}"
+
+        if "mma" in self.args.listen:
+
+            print(f"\nReceived Min/Max/Avg at '{end_timestamp.strftime("%Y-%m-%dT%H:%M:%S")}' :")
+
+            print(
+                f"\nTime range: {start_timestamp.strftime('%Y-%m-%d %H:%M:%S')} - {end_timestamp.strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+
+            for mma in mma_data:
+
+                print(f"\nChannel {mma['channel']}: {mma['type']}")
+                print(f"  Min: {mma['min']}")
+                print(f"  Max: {mma['max']}")
+                print(f"  Avg: {mma['avg']}")
+
+        if "mma" in self.args.write_log:
+            write_line(event.payload, timestamp_interval, mma_log_path)
+
+            if not args.quiet:
+                print("\nMin/Max/Avg data written to log file.")
+
+        if "mma" in self.args.write_csv:
+                
+            mma_sensor_values = {}
+            for mma_sensor in mma_data:
+
+                sensor_type = mma_sensor["type"]
+
+                mma_sensor_values.update({f"{sensor_type}_min": mma_sensor['min']})
+                mma_sensor_values.update({f"{sensor_type}_max": mma_sensor['max']})
+                mma_sensor_values.update({f"{sensor_type}_avg": mma_sensor['avg']})
+
+            write_row(mma_sensor_values, timestamp_interval, mma_csv_path)
+
+            if not self.args.quiet:
+                print("\nMin/Max/Avg data written to csv file.")
 
 # * STRTOBOOL FUNCTION
 def strtobool(val: str, default_val: bool | None = None) -> bool:
@@ -67,7 +244,7 @@ def strtobool(val: str, default_val: bool | None = None) -> bool:
 
 
 # * FILE MANIPULATION
-def create_file(file_type: str, data: str, path: str) -> [Path]:
+def create_file(metric: str, file_type: str, path: str) -> [Path]:
     """
     Try to create file on path with naming scheme: 'mc_{data}_log_yyyymmdd_HHMMSS.{file_type}'.
 
@@ -88,7 +265,7 @@ def create_file(file_type: str, data: str, path: str) -> [Path]:
 
     # Generate file name with this naming scheme: "mc_data_filetype_yyyymmdd_HHMMSS.ext" e. g. "mc_telemetry_log_20260101_123030.log"
     file_name = (
-        f"mc_{data}_log_{dt.datetime.now().strftime("%Y%m%d_%H%M%S")}.{file_type}"
+        f"mc_{metric}_log_{dt.datetime.now().strftime("%Y%m%d_%H%M%S")}.{file_type}"
     )
 
     abs_file_path = (path / file_name).resolve()
@@ -116,6 +293,13 @@ def create_file(file_type: str, data: str, path: str) -> [Path]:
 
     return abs_file_path
 
+def write_header(path, fieldnames: list) -> str:
+    
+    with open(path, "w", newline="") as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=["timestamp", *fieldnames])
+        writer.writeheader()
+
+        return writer.fieldnames
 
 def write_line(data: dict, timestamp: str, path: Path) -> None:
     """
@@ -155,6 +339,7 @@ def write_row(data: dict, timestamp: str, path: Path) -> None:
 # * EVENT HANDLERS
 async def on_telemetry(event: EventType.TELEMETRY_RESPONSE) -> None:
     """
+    Deprecated.
     Handle a telemetry response event.
 
     Args:
@@ -200,7 +385,7 @@ async def on_telemetry(event: EventType.TELEMETRY_RESPONSE) -> None:
 
 async def on_status(event: EventType.STATUS_RESPONSE) -> None:
     """
-    Handle a status response event.
+    Deprecated. Handle a status response event.
 
     Args:
         event (EventType.STATUS_RESPONSE): Status event data
@@ -254,7 +439,7 @@ async def on_status(event: EventType.STATUS_RESPONSE) -> None:
 
 async def on_mma(event: EventType.MMA_RESPONSE) -> None:
     """
-    Handle a Min/Max/Avg response event.
+    Deprecated. Handle a Min/Max/Avg response event.
 
     Args:
         event (EventType.MMA_RESPONSE): Min/Max/Avg event data
@@ -608,6 +793,9 @@ async def search_contacts(mc, query: str) -> dict | None:
 
     contact: dict | None = by_name or by_key
 
+    if contact is not None:
+        return contact
+
     # If the contact wasn't found by name or key
     print(
         f"Couldn't find companion/repeater in contacts using '{query}'."
@@ -635,16 +823,6 @@ async def search_contacts(mc, query: str) -> dict | None:
     return None
 
 async def main():
-
-    # These values are difficult to access cleanly so I made them global
-    global telemetry_log_path
-    global telemetry_csv_path
-
-    global status_log_path
-    global status_csv_path
-
-    global mma_log_path
-    global mma_csv_path
 
     if not args.quiet:
         print(f"Connecting to '{args.port}'...")
@@ -693,111 +871,38 @@ async def main():
             print("Nothing to do.")
             return
 
-        # * Construct task list, data to request list and sync events list
+        # * Instantiate the MeshCoreLogger class
 
-        # This list used to provide list of tasks to asyncio.gather()
-        list_of_tasks = []
+        mc_logger = MeshCoreLogger(mc, contact, args)
+
+        # Add metrics to the list of metrics to collect
+        for metric in ["telemetry", "status", "mma"]:
+
+            if metric in (args.listen or args.write_log or args.write_csv):
+                mc_logger.add_metric(metric)
+
+        # Create files and store paths in MeshCoreLogger.output_paths: dict[tuple[str, str], Path]
+        for metric in mc_logger.metrics:
+
+            for ext, write_flag in [("log", args.write_log), ("csv", args.write_csv)]:
+                
+                if metric in write_flag:
+
+                    path = create_file(metric, ext, args.path)
+                    mc_logger.store_path(metric, ext, path)
+
+                    if not args.quiet:
+                        print(f"Created {metric} {ext} file.")
+
+                    if args.verbose:
+                        print(f"Path to {metric} {ext} file: '{path}'")
+
+        #* FIND SENSORS AND SUBSCRIBE TO EVENTS
 
         # This list will be passed to idle() function to track which tasks are finished
         sync_events = []
 
-        # This is a list to determine to which event to subscribe to using meshcore.subscribe()
-        data_to_request = []
-
-        if "telemetry" in (args.listen or args.write_log or args.write_csv):
-
-            data_to_request.append("telemetry")
-
-        if "status" in (args.listen or args.write_log or args.write_csv):
-
-            data_to_request.append("status")
-
-        if "mma" in (args.listen or args.write_log or args.write_csv):
-
-            data_to_request.append("mma")
-
-        # Remove duplicates from data_to_request
-        data_to_request = list(set(data_to_request))
-
-        #* CREATE LOG FILES
-
-        if "telemetry" in args.write_log:
-
-            # gets the csv name and the telemetry csv path (global)
-            telemetry_log_path = create_file(
-                "log", "telemetry", args.path
-            )
-
-            if not args.quiet:
-                print("Created telemetry log file.")
-
-            if args.verbose:
-                print(f"Path to telemetry log file: '{telemetry_log_path}'")
-
-        if "status" in args.write_log:
-
-            status_log_path = create_file(
-                "log", "status", args.path
-            )
-
-            if not args.quiet:
-                print("Created status log file.")
-
-            if args.verbose:
-                print(f"Path to status log file: '{status_log_path}'")
-
-        if "mma" in args.write_log:
-
-            mma_log_path = create_file("log", "mma", args.path)
-
-            if not args.quiet:
-                print("Created Min/Max/Avg log file.")
-
-            if args.verbose:
-                print(f"Path to Min/Max/Avg log file: '{mma_log_path}'")
-
-        #* CREATE CSV FILES
-
-        if "telemetry" in args.write_csv:
-
-            # gets the telemetry csv name and the telemetry csv path (global)
-            telemetry_csv_path = create_file(
-                "csv", "telemetry", args.path
-            )
-
-            if not args.quiet:
-                print("Created telemetry csv file.")
-
-            if args.verbose:
-                print(f"Path to telemetry csv file: '{telemetry_csv_path}'")
-
-        if "status" in args.write_csv:
-
-            # gets the status csv name and the status csv path (global)
-            status_csv_path = create_file(
-                "csv", "status", args.path
-            )
-
-            if not args.quiet:
-                print("Created status csv file.")
-
-            if args.verbose:
-                print(f"Path to status csv file: '{status_csv_path}'")
-
-        if "mma" in args.write_csv:
-
-            # gets the mma csv name and the mma csv path (global)
-            mma_csv_path = create_file("csv", "mma", args.path)
-
-            if not args.quiet:
-                print("Created Min/Max/Avg csv file.")
-
-            if args.verbose:
-                print(f"Path to Min/Max/Avg csv file: '{mma_csv_path}'")
-
-        #* FIND SENSORS AND SUBSCRIBE TO EVENTS
-
-        if "telemetry" in data_to_request:
+        if "telemetry" in mc_logger.metrics:
 
             if not args.quiet:
                 print("Finding sensors...")
@@ -821,16 +926,16 @@ async def main():
             # Write telemetry csv header
             if "telemetry" in args.write_csv:
 
-                with open(telemetry_csv_path, "w", newline="") as csvfile:
-                    writer = csv.DictWriter(csvfile, fieldnames=["timestamp", *sensors])
-                    writer.writeheader()
+                header: list = write_header(
+                    mc_logger.get_path("telemetry", "csv"), sensors
+                    )
 
-                    if args.verbose:
-                        print("Telemetry csv header:", end=" ")
-                        print(*writer.fieldnames, sep=", ")
+                if args.verbose:
+                    print("Telemetry csv header:", end=" ")
+                    print(*header, sep=", ")
 
             # Subscribe to event
-            mc.subscribe(EventType.TELEMETRY_RESPONSE, on_telemetry)
+            mc.subscribe(EventType.TELEMETRY_RESPONSE, mc_logger.on_telemetry)
 
             # Create a asyncio event to only disconnect when all tasks are done
             # This is for the --disconnect-while-idle flag
@@ -838,12 +943,12 @@ async def main():
             sync_events.append(tele_event)
 
             # Append the telemetry request to the list of tasks
-            list_of_tasks.append(req_telemetry(mc, contact, args.frequency, tele_event))
+            mc_logger.add_task(req_telemetry(mc, contact, args.frequency, tele_event))
 
             if not args.quiet:
                 print("Created telemetry request task!")
 
-        if "status" in data_to_request:
+        if "status" in mc_logger.metrics:
 
             # Write status header
             if "status" in args.write_csv:
@@ -856,16 +961,16 @@ async def main():
                     print("Failed to get status! Please try again!")
                     return
 
-                with open(status_csv_path, "w", newline="") as csvfile:
-                    writer = csv.DictWriter(csvfile, fieldnames=["timestamp", *status])
-                    writer.writeheader()
+                header: list = write_header(
+                    mc_logger.get_path("status", "csv"), status
+                )
 
-                    if args.verbose:
-                        print("Status csv header:", end=" ")
-                        print(*writer.fieldnames, sep=", ")
+                if args.verbose:
+                    print("Status csv header:", end=" ")
+                    print(*header, sep=", ")
 
             # Subscribe to event
-            mc.subscribe(EventType.STATUS_RESPONSE, on_status)
+            mc.subscribe(EventType.STATUS_RESPONSE, mc_logger.on_status)
 
             # Create a asyncio event to only disconnect when all tasks are done
             # This is for the --disconnect-while-idle flag
@@ -873,12 +978,12 @@ async def main():
             sync_events.append(stat_event)
 
             # Append the telemetry request to the list of tasks
-            list_of_tasks.append(req_status(mc, contact, args.frequency, stat_event))
+            mc_logger.add_task(req_status(mc, contact, args.frequency, stat_event))
 
             if not args.quiet:
                 print("Created status request task!")
 
-        if "mma" in data_to_request:
+        if "mma" in mc_logger.metrics:
 
             if not args.quiet:
                 print("Finding sensors that support Min/Max/Avg data output...")
@@ -912,18 +1017,16 @@ async def main():
                     sensor_header.append(f"{sensor}_max")
                     sensor_header.append(f"{sensor}_avg")
 
-                with open(mma_csv_path, "w", newline="") as csvfile:
-                    writer = csv.DictWriter(
-                        csvfile, fieldnames=["timestamp", *sensor_header]
-                    )
-                    writer.writeheader()
-
-                    if args.verbose:
-                        print("Min/Max/Avg csv header:", end=" ")
-                        print(*writer.fieldnames, sep=", ")
+                header: list = write_header(
+                    mc_logger.get_path("mma", "csv"), sensor_header
+                )
+                
+                if args.verbose:
+                    print("Min/Max/Avg csv header:", end=" ")
+                    print(*header, sep=", ")
 
             # Subscribe to event
-            mc.subscribe(EventType.MMA_RESPONSE, on_mma)
+            mc.subscribe(EventType.MMA_RESPONSE, mc_logger.on_mma)
 
             # Create a asyncio event to only disconnect when all tasks are done
             # This is for the --disconnect-while-idle flag
@@ -931,17 +1034,17 @@ async def main():
             sync_events.append(mma_event)
 
             # Append the telemetry request to the list of tasks
-            list_of_tasks.append(req_mma(mc, contact, args.frequency, mma_event))
+            mc_logger.add_task(req_mma(mc, contact, args.frequency, mma_event))
 
             if not args.quiet:
                 print("Created Min/Max/Avg request task!")
 
-        # Insert the idle tasks to the start of list_of_tasks
+        # Insert the idle task to the start of mc_logger.tasks
         if args.disconnect_while_idle:
-            list_of_tasks.insert(0, idle(mc, args.frequency, sync_events))
+            mc_logger.tasks.insert(0, idle(mc, args.frequency, sync_events))
 
         #* START TASKS
-        await asyncio.gather(*list_of_tasks)
+        await asyncio.gather(*mc_logger.tasks)
 
     finally:
 
