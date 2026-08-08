@@ -608,6 +608,9 @@ async def search_contacts(mc, query: str) -> dict | None:
 
     contact: dict | None = by_name or by_key
 
+    if contact is not None:
+        return contact
+
     # If the contact wasn't found by name or key
     print(
         f"Couldn't find companion/repeater in contacts using '{query}'."
@@ -631,7 +634,7 @@ async def search_contacts(mc, query: str) -> dict | None:
         except ValueError:
             print("Please choose a valid option.", end=" ")
 
-    # If contact was not found
+    # Contact was not found
     return None
 
 async def main():
