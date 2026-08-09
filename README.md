@@ -33,7 +33,7 @@ Connect a MeshCore Companion USB device, identify the COM/TTY serial port the de
 
 ### Command-Line Arguments (--help)
 ```
-usage: project.py [-h] (-c NAME | KEY | -r NAME | KEY) [-pw PASSWORD] [-b BAUDRATE] 
+usage: mc_logger.py [-h] (-c NAME | KEY | -r NAME | KEY) [-pw PASSWORD] [-b BAUDRATE] 
                   [-l {telemetry,status,mma} [{telemetry,status,mma} ...]] 
                   [--write-log {telemetry,status,mma}[{telemetry,status,mma} ...]]
                   [--write-csv {telemetry,status,mma} [{telemetry,status,mma} ...]] 
@@ -41,7 +41,7 @@ usage: project.py [-h] (-c NAME | KEY | -r NAME | KEY) [-pw PASSWORD] [-b BAUDRA
                   [-v | -q] [-i] [-d]
                   port
 
-MeshCore Remote Logger
+Python CLI tool for automated remote data collection over a MeshCore LoRa network.
 
 positional arguments:
   port                  Serial port (e.g. 'COM4', '/dev/ttyUSB0')

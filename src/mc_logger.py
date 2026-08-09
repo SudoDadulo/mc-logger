@@ -981,7 +981,9 @@ async def main():
 if __name__ == "__main__":
 
     # * GLOBAL CLI ARGSPARSE BLOCK
-    parser = argparse.ArgumentParser(description="MeshCore Remote Logger")
+    parser = argparse.ArgumentParser(
+        description="Python CLI tool for automated remote data collection over a MeshCore LoRa network."
+        )
 
     # Positional argument port
     parser.add_argument("port", help="Serial port (e.g. 'COM4', '/dev/ttyUSB0')")
