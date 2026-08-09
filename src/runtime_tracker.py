@@ -10,9 +10,9 @@ class RuntimeTracker:
         runtime = end_time - self.start_time
 
         print(f"\nProgram runtime statistics:")
-        print(f"Start:   {self.start_time.strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"End:     {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"Runtime: {runtime.days} days, {runtime.seconds} seconds")
+        print(f"  Start:   {self.start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"  End:     {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"  Runtime: {runtime.days} days, {runtime.seconds} seconds")
 
         # Explicitly return false to not catch/supress exceptions
         return False

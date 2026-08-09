@@ -10,22 +10,23 @@ from pathlib import Path
 
 from meshcore import MeshCore, EventType
 
+from runtime_tracker import RuntimeTracker
+
 class MeshCoreLogger:
 
     def __init__(self, mc: MeshCore, contact: dict, args: argparse.Namespace):
         self.mc = mc
         self.contact = contact
         self.args = args
-        self.is_logged_in = False
 
-        # Store metrics
-        self.metrics = []
+        self.is_logged_in: bool = False
 
-        # Store tasks
-        self.tasks = []
+        self.metrics: list[str] = []
 
-        # Store sync events UNUSED
-        self.events = []
+        self.tasks: list[asyncio.coroutine] = []
+
+        # Flags that store task completion
+        self.completion_flags: list[asyncio.Event] = []
 
         # Store output paths as e.g. ()"telemetry", "csv"): path
         self.output_paths: dict[tuple[str, str], Path] = {}
@@ -41,6 +42,11 @@ class MeshCoreLogger:
 
     def get_path(self, metric: str, file_ext: str) -> Path | None:
         return self.output_paths.get((metric, file_ext))
+
+    def create_completion_flag(self):
+        event = asyncio.Event()
+        self.completion_flags.append(event)
+        return event
 
     def print_file_stats(self):
         
@@ -129,7 +135,7 @@ class MeshCoreLogger:
         if not self.args.quiet:
             print("\nSuccess requesting status!")
 
-        # Assing the payload to var
+        # Get status
         status = event.payload
 
         # Get timestamp
@@ -186,11 +192,11 @@ class MeshCoreLogger:
         if not self.args.quiet:
             print("\nSuccess requesting Min/Max/Avg!")
 
-        # assing the payload to var
+        # Get the lpp formatted data
         mma_data = event.payload["mma_data"]
 
         # Get now timestamp
-        end_timestamp = dt.datetime.now().timestamp()
+        end_timestamp = dt.datetime.now()
 
         # Convert the frequency argument to a timedelta object
         delta_timestamp = dt.timedelta(seconds=self.args.frequency)
@@ -203,7 +209,7 @@ class MeshCoreLogger:
 
         if "mma" in self.args.listen:
 
-            print(f"\nReceived Min/Max/Avg at '{end_timestamp.strftime("%Y-%m-%dT%H:%M:%S")}' :")
+            print(f"\nReceived Min/Max/Avg at '{end_timestamp.strftime('%Y-%m-%dT%H:%M:%S')}' :")
 
             print(
                 f"\nTime range: {start_timestamp.strftime('%Y-%m-%d %H:%M:%S')} - {end_timestamp.strftime('%Y-%m-%d %H:%M:%S')}"
@@ -282,7 +288,7 @@ def strtobool(val: str, default_val: bool | None = None) -> bool:
 
 
 # * FILE MANIPULATION
-def create_file(metric: str, file_type: str, path: str) -> [Path]:
+def create_file(metric: str, file_type: str, path: str) -> Path:
     """
     Try to create file on path with naming scheme: 'mc_{data}_log_yyyymmdd_HHMMSS.{file_type}'.
 
@@ -303,7 +309,7 @@ def create_file(metric: str, file_type: str, path: str) -> [Path]:
 
     # Generate file name with this naming scheme: "mc_data_filetype_yyyymmdd_HHMMSS.ext" e. g. "mc_telemetry_log_20260101_123030.log"
     file_name = (
-        f"mc_{metric}_log_{dt.datetime.now().strftime("%Y%m%d_%H%M%S")}.{file_type}"
+        f"mc_{metric}_log_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.{file_type}"
     )
 
     abs_file_path = (path / file_name).resolve()
@@ -323,15 +329,17 @@ def create_file(metric: str, file_type: str, path: str) -> [Path]:
                     with open(f"{abs_file_path}", "w"):
                         pass
                     break
+                
                 else:
-                    sys.exit(f"Exited cleanly without overwriting file.")
+                    print(f"Exited without overwriting file.")
+                    sys.exit()
 
             except ValueError:
                 print("Please choose a valid option. ")
 
     return abs_file_path
 
-def write_header(path, fieldnames: list) -> str:
+def write_header(path, fieldnames: list) -> list[str]:
     
     with open(path, "w", newline="") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=["timestamp", *fieldnames])
@@ -373,183 +381,19 @@ def write_row(data: dict, timestamp: str, path: Path) -> None:
 
         writer.writerow({"timestamp": timestamp} | data)
 
-
-# * EVENT HANDLERS
-async def on_telemetry(event: EventType.TELEMETRY_RESPONSE) -> None:
-    """
-    Deprecated.
-    Handle a telemetry response event.
-
-    Args:
-        event (EventType.TELEMETRY_RESPONSE): Telemetry event data
-
-    Returns:
-        None
-    """
-    if not args.quiet:
-        print("\nSuccess requesting telemetry!")
-
-    # Get the lpp formatted data
-    lpp_data = event.payload["lpp"]
-
-    timestamp = dt.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-
-    # Extract sensor types and corresponding values
-    sensors = [sensor["type"] for sensor in lpp_data]
-    values = [value["value"] for value in lpp_data]
-
-    # Combine lists into a dict
-    sensor_values = dict(zip(sensors, values))
-
-    if "telemetry" in args.listen:
-
-        print(f"\nReceived telemetry at '{timestamp}':\n")
-
-        for sensor in sensor_values:
-            print(f"{sensor} = {sensor_values[sensor]}")
-
-    if "telemetry" in args.write_log:
-        write_line(event.payload, timestamp, telemetry_log_path)
-
-        if not args.quiet:
-            print("\nTelemetry data written to log file.")
-
-    if "telemetry" in args.write_csv:
-        write_row(sensor_values, timestamp, telemetry_csv_path)
-
-        if not args.quiet:
-            print("\nTelemetry data written to csv file.")
-
-
-async def on_status(event: EventType.STATUS_RESPONSE) -> None:
-    """
-    Deprecated. Handle a status response event.
-
-    Args:
-        event (EventType.STATUS_RESPONSE): Status event data
-
-    Returns:
-        None
-    """
-    if not args.quiet:
-        print("\nSuccess requesting status!")
-
-    # Assing the payload to var
-    status = event.payload
-
-    # Get timestamp
-    timestamp = dt.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-
-    if "status" in args.listen:
-
-        print(f"\nReceived status at '{timestamp}':\n")
-
-        print(f"Battery: {status['bat']} mV")
-        print(f"Last RSSI: {status['last_rssi']} dBm")
-        print(f"Last SNR: {status['last_snr']} dB")
-        print(f"Noise Floor: {status['noise_floor']} dBm")
-        print(f"Uptime: {status['uptime']} seconds")
-        print(f"TX Queue: {status['tx_queue_len']} packets")
-        print(f"Packets Received: {status['nb_recv']}")
-        print(f"Packets Sent: {status['nb_sent']}")
-        print(f"Airtime: {status['airtime']} ms")
-        print(f"RX Airtime: {status['rx_airtime']} ms")
-        print(f"Flood packets sent: {status['sent_flood']}")
-        print(f"Direct packets sent: {status['sent_direct']}")
-        print(f"Flood packets received: {status['recv_flood']}")
-        print(f"Direct packets received: {status['recv_direct']}")
-        print(f"Full buffer events: {status['full_evts']}")
-        print(f"Duplicate direct: {status['direct_dups']}")
-        print(f"Duplicate flood: {status['flood_dups']}")
-
-    if "status" in args.write_log:
-        write_line(status, timestamp, status_log_path)
-
-        if not args.quiet:
-            print("\nStatus data written to log file.")
-
-    if "status" in args.write_csv:
-        write_row(status, timestamp, status_csv_path)
-
-        if not args.quiet:
-            print("\nStatus data written to csv file.")
-
-
-async def on_mma(event: EventType.MMA_RESPONSE) -> None:
-    """
-    Deprecated. Handle a Min/Max/Avg response event.
-
-    Args:
-        event (EventType.MMA_RESPONSE): Min/Max/Avg event data
-
-    Returns:
-        None
-    """
-    if not args.quiet:
-        print("\nSuccess requesting Min/Max/Avg!")
-
-    # assing the payload to var
-    mma_data = event.payload["mma_data"]
-
-    # Get now timestamp
-    end_timestamp = dt.datetime.now().timestamp()
-
-    # Convert the frequency argument to a timedelta object
-    delta_timestamp = dt.timedelta(seconds=args.frequency)
-
-    start_timestamp = end_timestamp - delta_timestamp
-
-    # ISO-8601 format for time intervals in log and csv
-    # 2007-03-01T13:00:00/2008-05-11T15:30:00
-    timestamp_interval = f"{start_timestamp.strftime('%Y-%m-%dT%H:%M:%S')}/{end_timestamp.strftime('%Y-%m-%dT%H:%M:%S')}"
-
-    if "mma" in args.listen:
-
-        print(f"\nReceived Min/Max/Avg at '{end_timestamp.strftime("%Y-%m-%dT%H:%M:%S")}' :")
-
-        print(
-            f"\nTime range: {start_timestamp.strftime('%Y-%m-%d %H:%M:%S')} - {end_timestamp.strftime('%Y-%m-%d %H:%M:%S')}"
-        )
-
-        for mma in mma_data:
-
-            print(f"\nChannel {mma['channel']}: {mma['type']}")
-            print(f"  Min: {mma['min']}")
-            print(f"  Max: {mma['max']}")
-            print(f"  Avg: {mma['avg']}")
-
-    if "mma" in args.write_log:
-        write_line(event.payload, timestamp_interval, mma_log_path)
-
-        if not args.quiet:
-            print("\nMin/Max/Avg data written to log file.")
-
-    if "mma" in args.write_csv:
-            
-        mma_sensor_values = {}
-        for mma_sensor in mma_data:
-
-            sensor_type = mma_sensor["type"]
-
-            mma_sensor_values.update({f"{sensor_type}_min": mma_sensor['min']})
-            mma_sensor_values.update({f"{sensor_type}_max": mma_sensor['max']})
-            mma_sensor_values.update({f"{sensor_type}_avg": mma_sensor['avg']})
-
-        write_row(mma_sensor_values, timestamp_interval, mma_csv_path)
-
-        if not args.quiet:
-            print("\nMin/Max/Avg data written to csv file.")
-
-
 # * TASKS
-async def idle(mc, frequency: int, sync_events: list[asyncio.Event]) -> None:
+async def idle(
+    mc: MeshCore, 
+    frequency: int, 
+    mc_logger: MeshCoreLogger,
+    ) -> None:
     """
     Disconnect while idle, wait until all requests are finished.
 
     Args:
-        mc (Meshcore instance): Connected MeshCore instance.
+        mc (MeshCore): Connected MeshCore instance.
         frequency (int): Time in seconds between disconnecting and connecting.
-        sync_events (list[asyncio.Event]): Tasks that need to finish before disconnecting.
+        mc_logger (MeshCoreLogger): MeshCoreLogger instance containing the state.
 
     Returns:
         None
@@ -561,13 +405,13 @@ async def idle(mc, frequency: int, sync_events: list[asyncio.Event]) -> None:
             await mc.connect()
             print("Connected to device.")
 
-        if args.verbose:
+        if mc_logger.args.verbose:
             print(
                 f"Waiting for all active backround tasks to finish before disconnecting..."
             )
 
-        # Wait until every event in the list has been set to True
-        await asyncio.gather(*[event.wait() for event in sync_events])
+        # Wait until every flag in the list has been set to True
+        await asyncio.gather(*[flag.wait() for flag in mc_logger.completion_flags])
 
         # Padding to allow event handlers to finish
         await asyncio.sleep(1.5)
@@ -576,36 +420,41 @@ async def idle(mc, frequency: int, sync_events: list[asyncio.Event]) -> None:
             await mc.disconnect()
             print(f"\nDisconnected from device, will connect again before next cycle.")
 
-        # Reset all events to False for the next cycle
-        for event in sync_events:
-            event.clear()
+        # Reset all flags to False for the next cycle
+        for flag in mc_logger.completion_flags:
+            flag.clear()
 
         # Sleep until just before next cycle
-        await asyncio.sleep(frequency - 5)
+        await asyncio.sleep(max(0.0, frequency - 5))
 
 
 async def req_telemetry(
-    mc, contact: dict, frequency: int, sync_event: asyncio.Event
-) -> None:
+    mc: MeshCore, 
+    contact: dict, 
+    frequency: int, 
+    mc_logger: MeshCoreLogger, 
+    completion_flag: asyncio.Event
+    ) -> None:
     """
-    Request telemetry from contact and trigger a telemetry response event.
+    Periodically request telemetry from a contact and signal loop completion.
 
     Args:
-        mc (MeshCore instance): Connected MeshCore instance
-        contact (dict): Contact from which to request telemetry
-        frequency (int): Time in seconds between telemetry requests
+        mc (MeshCore): Connected MeshCore instance.
+        contact (dict): Target contact from which to request telemetry.
+        frequency (int): Interval in seconds between telemetry requests.
+        mc_logger (MeshCoreLogger): MeshCoreLogger instance containing the state.
+        completion_flag (asyncio.Event): Event flag signaled when the request cycle completes.
 
     Returns:
         None
     """
-
     while True:
 
         loop_start_time = time.monotonic()
 
         next_request = dt.datetime.now() + dt.timedelta(seconds=frequency)
 
-        if not args.quiet:
+        if not mc_logger.args.quiet:
             print("Requesting telemetry...")
 
         # First request
@@ -632,39 +481,44 @@ async def req_telemetry(
                 print(f"(Attempt: {attempt + 1}/3)")
 
         # Signal completion even if fail to not stall forever
-        sync_event.set()
+        completion_flag.set()
 
         # Print next request datetime 
-        if not args.quiet:
+        if not mc_logger.args.quiet:
             print(f"\nRequesting telemetry again at {next_request.strftime('%Y-%m-%d %H:%M:%S')}")
 
         # Calculate time it took to finish request and subtract it from the frequency
         loop_finish_time = time.monotonic() - loop_start_time
-        await asyncio.sleep(frequency - loop_finish_time)
+        await asyncio.sleep(max(0.0, frequency - loop_finish_time))
 
 
 async def req_status(
-    mc, contact: dict, frequency: int, sync_event: asyncio.Event
-) -> None:
+    mc: MeshCore, 
+    contact: dict, 
+    frequency: int,
+    mc_logger: MeshCoreLogger, 
+    completion_flag: asyncio.Event
+    ) -> None:
     """
-    Request status from contact and trigger a status response event.
+    Periodically request status from a repeater contact and signal loop completion.
 
     Args:
-        mc (MeshCore instance): Connected MeshCore instance
-        contact (dict): Contact from which to request status
-        frequency (int): Time in seconds between status requests
+        mc (MeshCore): Connected MeshCore instance.
+        contact (dict): Target repeater contact from which to request status.
+        frequency (int): Interval in seconds between telemetry requests.
+        mc_logger (MeshCoreLogger): MeshCoreLogger instance containing the state.
+        completion_flag (asyncio.Event): Event flag signaled when the request cycle completes.
 
     Returns:
         None
     """
-
     while True:
 
         loop_start_time = time.monotonic()
 
         next_request = dt.datetime.now() + dt.timedelta(seconds=frequency)
 
-        if not args.quiet:
+        if not mc_logger.args.quiet:
             print("Requesting status...")
 
         # First request
@@ -689,41 +543,48 @@ async def req_status(
                 print(f"(Attempt: {attempt + 1}/3)")
 
         # Signal completion even if fail to not stall forever
-        sync_event.set()
+        completion_flag.set()
 
         # Print next request datetime 
-        if not args.quiet:
+        if not mc_logger.args.quiet:
             print(f"\nRequesting status again at {next_request.strftime('%Y-%m-%d %H:%M:%S')}")
 
         # Calculate time it took to finish request and subtract it from the frequency
         loop_finish_time = time.monotonic() - loop_start_time
-        await asyncio.sleep(frequency - loop_finish_time)
+        await asyncio.sleep(max(0.0, frequency - loop_finish_time))
 
 
-async def req_mma(mc, contact: dict, frequency: int, sync_event: asyncio.Event) -> None:
+async def req_mma(
+    mc: MeshCore, 
+    contact: dict, 
+    frequency: int, 
+    mc_logger: MeshCoreLogger,
+    completion_flag: asyncio.Event
+    ) -> None:
     """
-    Request Min/Max/Avg from contact and trigger a MMA response event.
+    Periodically request Min/Max/Avg telemetry data from a contact.
 
     Args:
-        mc (MeshCore instance): Connected MeshCore instance
-        contact (dict): Contact from which to request Min/Max/Avg
-        frequency (int): Time in seconds between Min/Max/Avg requests
+        mc (MeshCore): Connected MeshCore instance.
+        contact (dict): Target contact from which to request Min/Max/Avg telemetry.
+        frequency (int): Interval in seconds between Min/Max/Avg requests.
+        mc_logger (MeshCoreLogger): MeshCoreLogger instance containing the state.
+        sync_event (asyncio.Event): Event flag signaled when the request cycle completes.
 
     Returns:
         None
     """
-
     while True:
 
         loop_start_time = time.monotonic()
 
         next_request = dt.datetime.now() + dt.timedelta(seconds=frequency)
 
-        if not args.quiet:
+        if not mc_logger.args.quiet:
             print("Requesting Min/Max/Avg...")
 
         end_time = int(time.time())
-        start_time = end_time - 3600
+        start_time = end_time - frequency
 
         request = await mc.commands.req_mma_sync(
             contact, start=start_time, end=end_time, min_timeout=15.0
@@ -748,15 +609,15 @@ async def req_mma(mc, contact: dict, frequency: int, sync_event: asyncio.Event) 
                 print(f"(Attempt: {attempt + 1}/3)")
 
         # Signal completion even if fail to not stall forever
-        sync_event.set()
+        completion_flag.set()
 
         # Print next request datetime 
-        if not args.quiet:
+        if not mc_logger.args.quiet:
             print(f"\nRequesting Min/Max/Avg again at {next_request.strftime('%Y-%m-%d %H:%M:%S')}")
 
         # Calculate time it took to finish request and subtract it from the frequency
         loop_finish_time = time.monotonic() - loop_start_time
-        await asyncio.sleep(frequency - loop_finish_time)
+        await asyncio.sleep(max(0.0, frequency - loop_finish_time))
 
 # * LOGIN AND LOGOUT
 async def send_login(mc, contact: dict, password: str) -> EventType.LOGIN_SUCCESS | None:
@@ -805,11 +666,11 @@ async def send_logout(mc, contact: dict) -> EventType.ERROR | EventType.OK:
 
     # If login failed retry request 3 times
     if logout == EventType.ERROR:
-        print("Login failed!")
+        print("Logout failed!")
 
         for attempt in range(3):
 
-            print("Retrying login...")
+            print("Retrying logout...")
 
             logout = await mc.commands.send_logout(contact)
 
@@ -817,7 +678,7 @@ async def send_logout(mc, contact: dict) -> EventType.ERROR | EventType.OK:
             if logout == EventType.OK:
                 break
 
-            print("Login failed!", end=" ")
+            print("Logout failed!", end=" ")
             print(f"(Attempt: {attempt + 1}/3)")
 
     return logout
@@ -843,24 +704,29 @@ async def search_contacts(mc, query: str) -> dict | None:
     )
     print("Print available contacts?", end=" ")
 
-    response = await mc.commands.get_contacts()
-    contacts = response.payload
-
     while True:
         try:
 
             if strtobool(input("(Y/n) "), default_val=True):
-                print(f"\nAvailable contacts: {len(contacts)}")
-                        
-                for contact in contacts.values():
-                    print(f"{contact['adv_name']}: {contact['public_key']}")
+                
+                response = await mc.commands.get_contacts()
+                contacts = response.payload
+                
+                print(f"\nAvailable contacts: {len(contacts)}\n")
+                
+                for key, contact in contacts.items():
+                    print(f"{contact['adv_name']:<30}{key:>40}")
 
+            break
+
+        except (KeyboardInterrupt, EOFError):
+            print("\nProgram cancelled by user.")
             break
 
         except ValueError:
             print("Please choose a valid option.", end=" ")
 
-    # If contact was not found
+    # If contact was not found or user inputted False or quit
     return None
 
 async def main():
@@ -893,7 +759,7 @@ async def main():
         # Assign it to contact for sending requests
         contact = await search_contacts(mc, query)
 
-        # End the program because no contacts found using the search query
+        # End the program because no contacts found using the search query or user inputted false or quit
         if contact is None:
             return
 
@@ -983,13 +849,13 @@ async def main():
             # Subscribe to event
             mc.subscribe(EventType.TELEMETRY_RESPONSE, mc_logger.on_telemetry)
 
-            # Create a asyncio event to only disconnect when all tasks are done
-            # This is for the --disconnect-while-idle flag
-            tele_event = asyncio.Event()
-            sync_events.append(tele_event)
+            # Create asyncio.Event which gets asyncio.Event.set() when request is done
+            telemetry_flag = mc_logger.create_completion_flag()
 
             # Append the telemetry request to the list of tasks
-            mc_logger.add_task(req_telemetry(mc, contact, args.frequency, tele_event))
+            mc_logger.add_task(
+                req_telemetry(mc, contact, args.frequency, mc_logger, telemetry_flag)
+            )
 
             if not args.quiet:
                 print("Created telemetry request task!")
@@ -1018,13 +884,13 @@ async def main():
             # Subscribe to event
             mc.subscribe(EventType.STATUS_RESPONSE, mc_logger.on_status)
 
-            # Create a asyncio event to only disconnect when all tasks are done
-            # This is for the --disconnect-while-idle flag
-            stat_event = asyncio.Event()
-            sync_events.append(stat_event)
+            # Create asyncio.Event which gets asyncio.Event.set() when request is done
+            status_flag = mc_logger.create_completion_flag()
 
             # Append the telemetry request to the list of tasks
-            mc_logger.add_task(req_status(mc, contact, args.frequency, stat_event))
+            mc_logger.add_task(
+                req_status(mc, contact, args.frequency, mc_logger, status_flag)
+            )
 
             if not args.quiet:
                 print("Created status request task!")
@@ -1074,23 +940,28 @@ async def main():
             # Subscribe to event
             mc.subscribe(EventType.MMA_RESPONSE, mc_logger.on_mma)
 
-            # Create a asyncio event to only disconnect when all tasks are done
-            # This is for the --disconnect-while-idle flag
-            mma_event = asyncio.Event()
-            sync_events.append(mma_event)
+            # Create asyncio.Event which gets asyncio.Event.set() when request is done
+            mma_flag = mc_logger.create_completion_flag()
 
             # Append the telemetry request to the list of tasks
-            mc_logger.add_task(req_mma(mc, contact, args.frequency, mma_event))
+            mc_logger.add_task(
+                req_mma(mc, contact, args.frequency, mc_logger, mma_flag)
+            )
 
             if not args.quiet:
                 print("Created Min/Max/Avg request task!")
 
         # Insert the idle task to the start of mc_logger.tasks
         if args.disconnect_while_idle:
-            mc_logger.tasks.insert(0, idle(mc, args.frequency, sync_events))
+            mc_logger.tasks.insert(
+                0, idle(mc, args.frequency, mc_logger)
+                )
 
         #* START TASKS
         await asyncio.gather(*mc_logger.tasks)
+
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        print("\nProgram cancelled by user.")
 
     finally:
 
@@ -1131,12 +1002,12 @@ if __name__ == "__main__":
         "-r",
         "--repeater",
         metavar="NAME | KEY",
-        help="Target repeater node (pw required)",
+        help="Target repeater node (-pw/--password required)",
     )
 
     # Password has to be provided! if repeater
     parser.add_argument(
-        "-pw", "--password", help="Password for repeater login (required if --repeater)"
+        "-pw", "--password", help="Password for repeater login (required if -r/--repeater)"
     )
 
     parser.add_argument(
@@ -1324,7 +1195,7 @@ if __name__ == "__main__":
             )
         else:
             print(
-                f"Flag '-f/--frequency' is not active, frequecy set to default: {args.frequency} seconds"
+                f"Flag '-f/--frequency' is not active, frequency set to default: {args.frequency} seconds"
             )
 
         if args.path != os.getcwd():
@@ -1350,98 +1221,35 @@ if __name__ == "__main__":
 
         while True:
             try:
-
                 if strtobool(input("(Y/n) "), default_val=True):
                     break
 
                 else:
-                    print("Exited.")
-                    sys.exit()
+                    raise SystemExit
 
             except ValueError:
                 print("Please choose a valid option.", end=" ")
 
+            except SystemExit:
+                print("Exited.")
+                sys.exit()
+
+            except KeyboardInterrupt:
+                print("\nProgram cancelled by user.")
+                sys.exit()
+
     # * START PROGRAM
 
-    prog_start_time = dt.datetime.now()
-
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        print("\nProgram cancelled by user.")
-
-    # COMMENT OUT WHEN DEBUGGING
-    #except Exception as e:
-        #print(f"Error: {e}")
-
-    finally:
-
-        prog_end_time = dt.datetime.now()
-        prog_run_time = prog_end_time - prog_start_time
-
-        print(f"\nProgram runtime statistics:")
-        print(f"Start: {prog_start_time.strftime("%Y-%m-%d %H:%M:%S")}")
-        print(f"End: {prog_end_time.strftime("%Y-%m-%d %H:%M:%S")}")
-        print(f"Runtime: {prog_run_time.days} days, {prog_run_time.seconds} seconds")
-
-        # Needs to be inside a try block if the paths of the files weren't defined it will raise a NameError and do nothing
-        # TODO Use the mc_logger class
+    with RuntimeTracker():
+        
         try:
-
-            # LOG FILE STATISTICS
-
-            if "telemetry" in args.write_log and telemetry_log_path is not None:
-
-                with open(telemetry_log_path, "r") as logfile:
-                    for line_number, line_content in enumerate(logfile, start=1):
-                        pass  # Just iterate
-
-                print(f"Telemetry log: wrote {line_number} lines")
-
-            if "status" in args.write_log and status_log_path is not None:
-
-                with open(status_log_path, "r") as logfile:
-                    for line_number, line_content in enumerate(logfile, start=1):
-                        pass  # Just iterate
-
-                print(f"Status log: wrote {line_number} lines")
-
-            if "mma" in args.write_log and mma_log_path is not None:
-
-                with open(mma_log_path, "r") as logfile:
-                    for line_number, line_content in enumerate(logfile, start=1):
-                        pass  # Just iterate
-
-                print(f"Min/Max/Avg log: wrote {line_number} lines")
-
-            # CSV FILE STATISTICS
-            # Substracting 1 from every row to not count the header
-
-            if "telemetry" in args.write_csv and telemetry_csv_path is not None:
-
-                with open(telemetry_csv_path, "r") as csvfile:
-                    for row_number, row_content in enumerate(csvfile, start=1):
-                        pass  # Just iterate
-
-                print(f"Telemetry csv: wrote {row_number - 1} rows")
-
-            if "status" in args.write_csv and status_csv_path is not None:
-
-                with open(status_csv_path, "r") as csvfile:
-                    for row_number, row_content in enumerate(csvfile, start=1):
-                        pass  # Just iterate
-
-                print(f"Status csv: wrote {row_number - 1} rows")
-
-            if "mma" in args.write_csv and mma_csv_path is not None:
-
-                with open(mma_csv_path, "r") as csvfile:
-                    for row_number, row_content in enumerate(csvfile, start=1):
-                        pass  # Just iterate
-
-                print(f"Min/Max/Avg csv: wrote {row_number - 1} rows")
-
-        # Just not to show an exception to the user
-        # Catches the exception that is trown if any of the paths to files are undefined
-        except NameError:
-            pass
+            asyncio.run(main())
+        
+        except Exception as e:
+            
+            # Reraises the exception
+            if args.debug:
+                raise
+            
+            else:
+                print(f"\nError: {e}")
