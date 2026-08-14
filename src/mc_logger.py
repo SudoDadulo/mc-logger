@@ -19,7 +19,7 @@ class MeshCoreLogger:
         self.contact = contact
         self.args = args
 
-        self.is_logged_in: bool = False
+        self._logged_in: bool = False
 
         self.metrics: list[str] = []
 
@@ -77,6 +77,28 @@ class MeshCoreLogger:
 
             except OSError as e:
                 print(f"  Error reading {path}: {e}")
+
+    @property
+    def is_logged_in(self) -> bool:
+        return self._logged_in
+
+    @is_logged_in.setter
+    def is_logged_in(self, value: bool) -> None:
+        self._logged_in = value
+
+    async def ensure_logged_in(self) -> bool:
+
+        if not self.args.repeater or self._logged_in:
+            return True
+            
+        login = await rpt_login(self.mc, self.contact, self.args.password)
+
+        if login is not None:
+            self._logged_in = True
+            return True
+
+        self._logged_in = False
+        return False
 
     async def on_telemetry(self, event: EventType.TELEMETRY_RESPONSE) -> None:
         """
@@ -454,6 +476,17 @@ async def req_telemetry(
 
         next_request = dt.datetime.now() + dt.timedelta(seconds=frequency)
 
+        # Ensure repeater login, sleeps if failure, returns true if repeater
+        if not await mc_logger.ensure_logged_in():
+            print("Skipping telemetry request due to login failure.")
+            
+            completion_flag.set()
+
+            loop_finish_time = time.monotonic() - loop_start_time
+            await asyncio.sleep(max(0.0, frequency - loop_finish_time))
+
+            continue
+
         if not mc_logger.args.quiet:
             print("Requesting telemetry...")
 
@@ -479,6 +512,15 @@ async def req_telemetry(
 
                 print("Telemetry request failed!", end=" ")
                 print(f"(Attempt: {attempt + 1}/3)")
+        
+        if request is None:
+            
+            if mc_logger.args.companion:
+                print("Error: The companion/sensor may be unreachable.")
+
+            if mc_logger.args.repeater:
+                print("Error: The repeater may be unreachable or the session is not authenticated.")
+                mc_logger.is_logged_in = False
 
         # Signal completion even if fail to not stall forever
         completion_flag.set()
@@ -518,6 +560,18 @@ async def req_status(
 
         next_request = dt.datetime.now() + dt.timedelta(seconds=frequency)
 
+        # Ensure repeater login, sleeps if failure, returns true if repeater
+        if not await mc_logger.ensure_logged_in():
+            print("Skipping status request due to login failure.")
+            
+            completion_flag.set()
+
+            loop_finish_time = time.monotonic() - loop_start_time
+            await asyncio.sleep(max(0.0, frequency - loop_finish_time))
+
+            continue
+
+
         if not mc_logger.args.quiet:
             print("Requesting status...")
 
@@ -541,6 +595,11 @@ async def req_status(
 
                 print("Status request failed!", end=" ")
                 print(f"(Attempt: {attempt + 1}/3)")
+
+        if request is None:
+            print("Error: The repeater may be unreachable or the session is not authenticated.")
+            
+            mc_logger.is_logged_in = False
 
         # Signal completion even if fail to not stall forever
         completion_flag.set()
@@ -580,6 +639,18 @@ async def req_mma(
 
         next_request = dt.datetime.now() + dt.timedelta(seconds=frequency)
 
+    
+        # Ensure repeater login, sleeps if failure, returns true if repeater
+        if not await mc_logger.ensure_logged_in():
+            print("Skipping Min/Max/Avg request due to login failure.")
+            
+            completion_flag.set()
+
+            loop_finish_time = time.monotonic() - loop_start_time
+            await asyncio.sleep(max(0.0, frequency - loop_finish_time))
+
+            continue
+
         if not mc_logger.args.quiet:
             print("Requesting Min/Max/Avg...")
 
@@ -608,6 +679,11 @@ async def req_mma(
                 print("Min/Max/Avg request failed!", end=" ")
                 print(f"(Attempt: {attempt + 1}/3)")
 
+        if request is None:
+            print("Error: The node may be unreachable or the session is not authenticated.")
+            
+            mc_logger.is_logged_in = False
+
         # Signal completion even if fail to not stall forever
         completion_flag.set()
 
@@ -620,24 +696,29 @@ async def req_mma(
         await asyncio.sleep(max(0.0, frequency - loop_finish_time))
 
 # * LOGIN AND LOGOUT
-async def send_login(mc, contact: dict, password: str) -> EventType.LOGIN_SUCCESS | None:
+async def rpt_login(
+    mc: MeshCore, 
+    contact: dict, 
+    password: str, 
+    ) -> EventType.LOGIN_SUCCESS | None:
 
     print("Logging in...")
 
     # Send login request and wait for response
-    login  = await mc.commands.send_login_sync(
+    login = await mc.commands.send_login_sync(
         contact, password, timeout=0, min_timeout=10
         )
 
     # If login failed retry request 3 times
-    if login  is None:
+    if login is None:
         print("Login failed!")
 
+        # If all 3 attempts fail then login is still none
         for attempt in range(3):
 
             print("Retrying login...")
 
-            login = await mc.commands.send_login_sync(
+            login= await mc.commands.send_login_sync(
                 contact, password, timeout=0, min_timeout=10
                 )
 
@@ -651,7 +732,7 @@ async def send_login(mc, contact: dict, password: str) -> EventType.LOGIN_SUCCES
     return login
 
 
-async def send_logout(mc, contact: dict) -> EventType.ERROR | EventType.OK:
+async def rpt_logout(mc, contact: dict) -> EventType.ERROR | EventType.OK:
 
     # When the --disconnect-while-idle flag is active the connected device over serial
     # cant send logout request so we have to connect to send it
@@ -662,26 +743,26 @@ async def send_logout(mc, contact: dict) -> EventType.ERROR | EventType.OK:
     print("Logging out...")
 
     # Send login request and wait for response
-    logout  = await mc.commands.send_logout(contact)
+    logout_event = await mc.commands.send_logout(contact)
 
     # If login failed retry request 3 times
-    if logout == EventType.ERROR:
+    if logout_event == EventType.ERROR:
         print("Logout failed!")
 
         for attempt in range(3):
 
             print("Retrying logout...")
 
-            logout = await mc.commands.send_logout(contact)
+            logout_event = await mc.commands.send_logout(contact)
 
-            # If login success
-            if logout == EventType.OK:
+            # If logout success
+            if logout_event == EventType.OK:
                 break
 
             print("Logout failed!", end=" ")
             print(f"(Attempt: {attempt + 1}/3)")
 
-    return logout
+    return logout_event
 
 # * SEARCH CONTACTS
 async def search_contacts(mc, query: str) -> dict | None:
@@ -770,14 +851,13 @@ async def main():
         if args.repeater:
 
             # Send login to repeater
-            login = await send_login(mc, contact, args.password)
+            login = await rpt_login(mc, contact, args.password)
 
             # End the program when login failed
             if login is None:
                 print("The password you entered may be incorrect or the repeater may be unreachable.")
                 return
 
-            # Set state as logged in
             mc_logger.is_logged_in = True
 
             print("Success logging in!")
@@ -811,9 +891,6 @@ async def main():
 
         #* FIND SENSORS AND SUBSCRIBE TO EVENTS
 
-        # This list will be passed to idle() function to track which tasks are finished
-        sync_events = []
-
         if "telemetry" in mc_logger.metrics:
 
             if not args.quiet:
@@ -824,7 +901,7 @@ async def main():
             )
 
             if telemetry is None:
-                print("Failed to get sensors! Please try again!")
+                print("Error: Failed to get sensors! The node may be unreachable.")
                 return
 
             # This list comprehension extracts the sensor type
@@ -854,7 +931,7 @@ async def main():
 
             # Append the telemetry request to the list of tasks
             mc_logger.add_task(
-                req_telemetry(mc, contact, args.frequency, mc_logger, telemetry_flag)
+                req_telemetry(mc, contact, args.frequency, mc_logger, telemetry_flag), 
             )
 
             if not args.quiet:
@@ -889,7 +966,7 @@ async def main():
 
             # Append the telemetry request to the list of tasks
             mc_logger.add_task(
-                req_status(mc, contact, args.frequency, mc_logger, status_flag)
+                req_status(mc, contact, args.frequency, mc_logger, status_flag), 
             )
 
             if not args.quiet:
@@ -945,7 +1022,7 @@ async def main():
 
             # Append the telemetry request to the list of tasks
             mc_logger.add_task(
-                req_mma(mc, contact, args.frequency, mc_logger, mma_flag)
+                req_mma(mc, contact, args.frequency, mc_logger, mma_flag), 
             )
 
             if not args.quiet:
@@ -968,7 +1045,13 @@ async def main():
         if mc_logger is not None:
             
             if mc_logger.is_logged_in:
-                await send_logout(mc, contact)
+                logout_event = await rpt_logout(mc, contact)
+
+                if logout_event == EventType.ERROR:
+                    print("Still logged in!")
+
+                if logout_event == EventType.OK and not args.quiet:
+                    print("Logged out successfully!")
 
         # Diconnect cleanly, only if device is connected
         if mc.is_connected:
@@ -1009,7 +1092,9 @@ if __name__ == "__main__":
 
     # Password has to be provided! if repeater
     parser.add_argument(
-        "-pw", "--password", help="Password for repeater login (required if -r/--repeater)"
+        "-pw", "--password",
+        default="",
+        help="Password for repeater login (required if -r/--repeater)"
     )
 
     parser.add_argument(
@@ -1094,10 +1179,6 @@ if __name__ == "__main__":
 
     # Argument validity checking
 
-    # Login required for repeater
-    if args.repeater and not args.password:
-        parser.error("argument -pw/--password: required if -r/--repeater")
-
     # Cant use --interactive with --quiet
     if args.quiet and args.interactive:
         parser.error("argument -q/--quiet: not allowed with argument -i/--interactive/")
@@ -1163,9 +1244,16 @@ if __name__ == "__main__":
             print(
                 f"Flag '-r/--repeater' is active, will try to find target repeater in contacts using {args.repeater!r}"
             )
-            print(
-                f"Flag '-pw/--password' is active, will try to login with {args.password!r}"
-            )
+
+            if args.password != "":
+                print(
+                    f"Flag '-pw/--password' is active, will try to login with {args.password!r}"
+                )
+
+            else:
+                print(
+                    f"Flag '-pw/--password' is not active, will try to login without password"
+                    )
 
         if args.baudrate != 115200:
 
@@ -1249,7 +1337,7 @@ if __name__ == "__main__":
         
         except Exception as e:
             
-            # Reraises the exception
+            # Reraises the exception if debug
             if args.debug:
                 raise
             
