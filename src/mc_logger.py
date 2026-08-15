@@ -8,9 +8,19 @@ import os
 
 from pathlib import Path
 
+from serial.serialutil import SerialException
+
 from meshcore import MeshCore, EventType
 
 from runtime_tracker import RuntimeTracker
+
+CONTACT_TYPES = {
+    0: "NO_TYPE",
+    1: "COMP",
+    2: "REPEAT",
+    3: "ROOM",
+    4: "SENS",
+}
 
 class MeshCoreLogger:
 
@@ -21,14 +31,19 @@ class MeshCoreLogger:
 
         self._logged_in: bool = False
 
+        self._contact_type = contact.get("type", 0)
+        self.contact_typename = CONTACT_TYPES.get(self._contact_type, "UNKNOWN")
+
+        # List to metrics to collect
         self.metrics: list[str] = []
 
+        # List of tasks passed to asyncio.gather()
         self.tasks: list[asyncio.coroutine] = []
 
         # Flags that store task completion
         self.completion_flags: list[asyncio.Event] = []
 
-        # Store output paths as e.g. ()"telemetry", "csv"): path
+        # Store output paths as e.g. ("telemetry", "csv"): path
         self.output_paths: dict[tuple[str, str], Path] = {}
     
     def add_metric(self, metric) -> None:
@@ -76,7 +91,7 @@ class MeshCoreLogger:
                     print(f"  {metric.capitalize()} Log: wrote {line_count} lines")
 
             except OSError as e:
-                print(f"  Error reading {path}: {e}")
+                print(f"Error: couldn't read {path}: {e}")
 
     @property
     def is_logged_in(self) -> bool:
@@ -88,10 +103,10 @@ class MeshCoreLogger:
 
     async def ensure_logged_in(self) -> bool:
 
-        if not self.args.repeater or self._logged_in:
+        if self.contact_typename not in ("REPEAT", "SENS") or self._logged_in:
             return True
-            
-        login = await rpt_login(self.mc, self.contact, self.args.password)
+        
+        login = await node_login(self.mc, self.contact, self.args.password)
 
         if login is not None:
             self._logged_in = True
@@ -99,6 +114,23 @@ class MeshCoreLogger:
 
         self._logged_in = False
         return False
+
+    async def on_connected(self, event):
+        print(f"Connected: {event.payload}")
+        
+        if event.payload.get('reconnected'):
+            
+            if not self.args.quiet:
+                print("Successfully reconnected!")
+
+    async def on_disconnected(self, event):
+        print(f"Disconnected: {event.payload['reason']}")
+        
+        if event.payload.get('max_attempts_exceeded'):
+            print("Max reconnection attempts exceeded")
+
+        # Reset logged in flag on unexpected disconnection
+        self._logged_in = False
 
     async def on_telemetry(self, event: EventType.TELEMETRY_RESPONSE) -> None:
         """
@@ -132,13 +164,13 @@ class MeshCoreLogger:
             for sensor in sensor_values:
                 print(f"{sensor} = {sensor_values[sensor]}")
 
-        if "telemetry" in self.args.write_log:
+        if "telemetry" in self.args.log:
             write_line(event.payload, timestamp, self.get_path("telemetry", "log"))
 
             if not self.args.quiet:
                 print("\nTelemetry data written to log file.")
 
-        if "telemetry" in self.args.write_csv:
+        if "telemetry" in self.args.csv:
             write_row(sensor_values, timestamp, self.get_path("telemetry", "csv"))
 
             if not self.args.quiet:
@@ -185,7 +217,7 @@ class MeshCoreLogger:
             print(f"Duplicate direct: {status['direct_dups']}")
             print(f"Duplicate flood: {status['flood_dups']}")
 
-        if "status" in self.args.write_log:
+        if "status" in self.args.log:
             write_line(
                 status, timestamp, self.get_path("status", "log")
                 )
@@ -193,7 +225,7 @@ class MeshCoreLogger:
             if not self.args.quiet:
                 print("\nStatus data written to log file.")
 
-        if "status" in self.args.write_csv:
+        if "status" in self.args.csv:
             write_row(
                 status, timestamp, self.get_path("status", "csv")
                 )
@@ -244,7 +276,7 @@ class MeshCoreLogger:
                 print(f"  Max: {mma['max']}")
                 print(f"  Avg: {mma['avg']}")
 
-        if "mma" in self.args.write_log:
+        if "mma" in self.args.log:
             write_line(
                 event.payload, timestamp_interval, self.get_path("mma", "log")
                 )
@@ -252,7 +284,7 @@ class MeshCoreLogger:
             if not self.args.quiet:
                 print("\nMin/Max/Avg data written to log file.")
 
-        if "mma" in self.args.write_csv:
+        if "mma" in self.args.csv:
                 
             mma_sensor_values = {}
             for mma_sensor in mma_data:
@@ -476,9 +508,9 @@ async def req_telemetry(
 
         next_request = dt.datetime.now() + dt.timedelta(seconds=frequency)
 
-        # Ensure repeater login, sleeps if failure, returns true if repeater
+        # Ensure login, sleeps if failure, returns true if node doesnt need login
         if not await mc_logger.ensure_logged_in():
-            print("Skipping telemetry request due to login failure.")
+            print("Warning: Skipping telemetry request due to login failure.")
             
             completion_flag.set()
 
@@ -490,19 +522,13 @@ async def req_telemetry(
         if not mc_logger.args.quiet:
             print("Requesting telemetry...")
 
-        # First request
-        request = await mc.commands.req_telemetry_sync(
-            contact, timeout=0, min_timeout=5.0
-        )
-
-        # If failed retry request 3 times
-        if request is None:
-            print("Telemetry request failed!")
-
-            for attempt in range(3):
-
-                print(f"Retrying telemetry request...")
-
+        request = None
+        for attempt in range(4): # first telemetry request attempt + 3 retries
+            if attempt > 0:
+                print(f"Retrying telemetry request... (Attempt {attempt}/3)")
+    
+            try:
+                
                 request = await mc.commands.req_telemetry_sync(
                     contact, timeout=0, min_timeout=5.0
                 )
@@ -510,16 +536,22 @@ async def req_telemetry(
                 if request is not None:
                     break
 
-                print("Telemetry request failed!", end=" ")
-                print(f"(Attempt: {attempt + 1}/3)")
-        
-        if request is None:
-            
-            if mc_logger.args.companion:
-                print("Error: The companion/sensor may be unreachable.")
+            except (SerialException, OSError, asyncio.TimeoutError) as e:
+                err = f": {e}" if mc_logger.args.verbose else ""
+                print(f"Warning: Transport error during telemetry request{err}")
+                request = None
 
-            if mc_logger.args.repeater:
-                print("Error: The repeater may be unreachable or the session is not authenticated.")
+                # If disconnected dont retry
+                if not mc.is_connected:
+                    break
+
+        if request is None and mc.is_connected:
+            
+            if mc_logger.contact_typename == "COMP":
+                print("Error: The companion may be unreachable or you don't have the permission to access telemetry.")
+
+            else:
+                print("Error: The node may be unreachable or the session is not authenticated.")
                 mc_logger.is_logged_in = False
 
         # Signal completion even if fail to not stall forever
@@ -562,7 +594,7 @@ async def req_status(
 
         # Ensure repeater login, sleeps if failure, returns true if repeater
         if not await mc_logger.ensure_logged_in():
-            print("Skipping status request due to login failure.")
+            print("Warning: Skipping status request due to login failure.")
             
             completion_flag.set()
 
@@ -571,21 +603,16 @@ async def req_status(
 
             continue
 
-
         if not mc_logger.args.quiet:
             print("Requesting status...")
 
-        # First request
-        request = await mc.commands.req_status_sync(contact, timeout=0, min_timeout=5.0)
-
-        # If failed retry request 3 times
-        if request is None:
-            print("Status request failed!")
-
-            for attempt in range(3):
-
-                print("Retrying status request...")
-
+        request = None
+        for attempt in range(4): # first status request attempt + 3 retries
+            if attempt > 0:
+                print(f"Retrying status request... (Attempt {attempt}/3)")
+    
+            try:
+                
                 request = await mc.commands.req_status_sync(
                     contact, timeout=0, min_timeout=5.0
                 )
@@ -593,12 +620,18 @@ async def req_status(
                 if request is not None:
                     break
 
-                print("Status request failed!", end=" ")
-                print(f"(Attempt: {attempt + 1}/3)")
+            except (SerialException, OSError, asyncio.TimeoutError) as e:
+                err = f": {e}" if mc_logger.args.verbose else ""
+                print(f"Warning: Transport error during status request{err}")
+                request = None
 
-        if request is None:
-            print("Error: The repeater may be unreachable or the session is not authenticated.")
+                # If disconnected dont retry
+                if not mc.is_connected:
+                    break
+
+        if request is None and mc.is_connected:
             
+            print("Error: The node may be unreachable or the session is not authenticated.")
             mc_logger.is_logged_in = False
 
         # Signal completion even if fail to not stall forever
@@ -642,7 +675,7 @@ async def req_mma(
     
         # Ensure repeater login, sleeps if failure, returns true if repeater
         if not await mc_logger.ensure_logged_in():
-            print("Skipping Min/Max/Avg request due to login failure.")
+            print("Warning: Skipping Min/Max/Avg request due to login failure.")
             
             completion_flag.set()
 
@@ -657,33 +690,34 @@ async def req_mma(
         end_time = int(time.time())
         start_time = end_time - frequency
 
-        request = await mc.commands.req_mma_sync(
-            contact, start=start_time, end=end_time, min_timeout=15.0
-        )
-
-        # If failed retry request 3 times
-        if request is None:
-            print("Min/Max/Avg request failed!")
-
-            for attempt in range(3):
-
-                print("Retrying Min/Max/Avg request...")
-
+        request = None
+        for attempt in range(4): # first status request attempt + 3 retries
+            if attempt > 0:
+                print(f"Retrying Min/Max/Avg request... (Attempt {attempt}/3)")
+    
+            try:
+                
                 request = await mc.commands.req_mma_sync(
-                    contact, start=start_time, end=end_time, min_timeout=15.0
+                    contact, start_time, end_time, timeout=0, min_timeout=10.0
                 )
 
                 if request is not None:
                     break
 
-                print("Min/Max/Avg request failed!", end=" ")
-                print(f"(Attempt: {attempt + 1}/3)")
+            except (SerialException, OSError, asyncio.TimeoutError) as e:
+                err = f": {e}" if mc_logger.args.verbose else ""
+                print(f"Warning: Transport error during Min/Max/Avg request{err}")
+                request = None
 
-        if request is None:
-            print("Error: The node may be unreachable or the session is not authenticated.")
+                # If disconnected dont retry
+                if not mc.is_connected:
+                    break
+
+        if request is None and mc.is_connected:
             
+            print("Error: The node may be unreachable or the session is not authenticated.")
             mc_logger.is_logged_in = False
-
+        
         # Signal completion even if fail to not stall forever
         completion_flag.set()
 
@@ -696,7 +730,7 @@ async def req_mma(
         await asyncio.sleep(max(0.0, frequency - loop_finish_time))
 
 # * LOGIN AND LOGOUT
-async def rpt_login(
+async def node_login(
     mc: MeshCore, 
     contact: dict, 
     password: str, 
@@ -704,63 +738,63 @@ async def rpt_login(
 
     print("Logging in...")
 
-    # Send login request and wait for response
-    login = await mc.commands.send_login_sync(
-        contact, password, timeout=0, min_timeout=10
-        )
-
-    # If login failed retry request 3 times
-    if login is None:
-        print("Login failed!")
-
-        # If all 3 attempts fail then login is still none
-        for attempt in range(3):
-
-            print("Retrying login...")
-
-            login= await mc.commands.send_login_sync(
+    login = None
+    for attempt in range(4): # first login attempt + 3 retries
+        if attempt > 0:
+            print(f"Retrying login... (Attempt {attempt}/3)")
+    
+        try:
+            
+            login = await mc.commands.send_login_sync(
                 contact, password, timeout=0, min_timeout=10
                 )
 
-            # If login success
             if login is not None:
                 break
 
-            print("Login failed!", end=" ")
-            print(f"(Attempt: {attempt + 1}/3)")
+        except (SerialException, OSError, asyncio.TimeoutError) as e:
+            print(f"Warning: Transport error during login: {e}")
+            login = None
+            # If disconnected dont retry
+            if not mc.is_connected:
+                break
 
     return login
 
+async def node_logout(mc, contact: dict) -> EventType.ERROR | EventType.OK:
 
-async def rpt_logout(mc, contact: dict) -> EventType.ERROR | EventType.OK:
+    logout_event = EventType.ERROR
 
     # When the --disconnect-while-idle flag is active the connected device over serial
     # cant send logout request so we have to connect to send it
     if not mc.is_connected:
-        await mc.connect()
-        print("Connected just to send logout to repeater.")
+        try:
+            await mc.connect()
+            print("Connected just to send logout.")
+
+        except (SerialException, OSError, asyncio.TimeoutError) as e:
+            print(f"Warning: Could not reconnect to send logout: {e}")
+            return EventType.ERROR
 
     print("Logging out...")
 
-    # Send login request and wait for response
-    logout_event = await mc.commands.send_logout(contact)
-
-    # If login failed retry request 3 times
-    if logout_event == EventType.ERROR:
-        print("Logout failed!")
-
-        for attempt in range(3):
-
-            print("Retrying logout...")
-
+    for attempt in range(4): # first login attempt + 3 retries
+        if attempt > 0:
+            print(f"Retrying logout... (Attempt {attempt}/3)")
+    
+        try:
             logout_event = await mc.commands.send_logout(contact)
 
-            # If logout success
-            if logout_event == EventType.OK:
+            if logout_event != EventType.ERROR:
                 break
 
-            print("Logout failed!", end=" ")
-            print(f"(Attempt: {attempt + 1}/3)")
+        except (SerialException, OSError, asyncio.TimeoutError) as e:
+            print(f"Warning: Transport error during logout: {e}")
+            logout_event = EventType.ERROR
+            
+            # If disconnected dont retry
+            if not mc.is_connected:
+                break
 
     return logout_event
 
@@ -819,8 +853,9 @@ async def main():
         print(f"Connecting to '{args.port}'...")
 
     # Connect to the device
-    mc = await MeshCore.create_serial(args.port, args.baudrate, debug=args.debug)
-    print("Device connected!")
+    mc = await MeshCore.create_serial(
+        args.port, args.baud, debug=args.debug, auto_reconnect=True, max_reconnect_attempts=5
+        )
 
     try:
 
@@ -829,16 +864,11 @@ async def main():
             print("Couldn't fetch contacts.")
             return
 
-        # Assigns the advert name or key to the variable
-        # This works because one of them is always None
-        query = args.companion or args.repeater
-
         if not args.quiet:
-            print(f"Finding companion/repeater in contacts using '{query}' ...")
+            print(f"Finding target node in contacts using '{args.node}' ...")
 
-        # Search the contacts for the contact search query
-        # Assign it to contact for sending requests
-        contact = await search_contacts(mc, query)
+        # Search for contact
+        contact = await search_contacts(mc, args.node)
 
         # End the program because no contacts found using the search query or user inputted false or quit
         if contact is None:
@@ -847,40 +877,48 @@ async def main():
         # * Instantiate the MeshCoreLogger class
         mc_logger = MeshCoreLogger(mc, contact, args)
 
-        # Login to repeater
-        if args.repeater:
+        # Subscribe to connection status events
+        mc.subscribe(EventType.CONNECTED, mc_logger.on_connected)
+        mc.subscribe(EventType.DISCONNECTED, mc_logger.on_disconnected)
 
-            # Send login to repeater
-            login = await rpt_login(mc, contact, args.password)
+        # Unsupported node types
+        if mc_logger.contact_typename in ("NO_TYPE", "ROOM", "UNKNOWN"):
+            print(f"Error: Unsupported node type: {mc_logger.contact_typename}")
+            return
+
+        # Nodes that need login
+        if mc_logger.contact_typename in ("REPEAT", "SENS"):
+            
+            login = await node_login(mc, contact, args.password)
 
             # End the program when login failed
             if login is None:
-                print("The password you entered may be incorrect or the repeater may be unreachable.")
+                if mc.is_connected:
+                
+                    if args.password == "":
+                        print("Error: You didn't enter a password. Access may be disabled or the node may be unreachable.")
+                    else:
+                        print("Error: The password you entered may be incorrect or the node may be unreachable.") 
+                
                 return
 
             mc_logger.is_logged_in = True
-
             print("Success logging in!")
-
-        # Exit the program if there is nothing to do
-        if not args.listen and not args.write_log and not args.write_csv:
-            print("Nothing to do.")
-            return
 
         # Add metrics to the list of metrics to collect
         for metric in ["telemetry", "status", "mma"]:
 
-            if metric in (args.listen or args.write_log or args.write_csv):
+            if metric in (args.listen or args.log or args.csv):
                 mc_logger.add_metric(metric)
 
         # Create files and store paths in MeshCoreLogger.output_paths: dict[tuple[str, str], Path]
         for metric in mc_logger.metrics:
 
-            for ext, write_flag in [("log", args.write_log), ("csv", args.write_csv)]:
+            for ext, arg in [("log", args.log), ("csv", args.csv)]:
                 
-                if metric in write_flag:
+                if metric in arg:
 
-                    path = create_file(metric, ext, args.path)
+                    path = create_file(metric, ext, args.output)
                     mc_logger.store_path(metric, ext, path)
 
                     if not args.quiet:
@@ -913,7 +951,7 @@ async def main():
                     print(f"Found {sensor} sensor!")
 
             # Write telemetry csv header
-            if "telemetry" in args.write_csv:
+            if "telemetry" in args.csv:
 
                 header: list = write_header(
                     mc_logger.get_path("telemetry", "csv"), sensors
@@ -940,7 +978,7 @@ async def main():
         if "status" in mc_logger.metrics:
 
             # Write status header
-            if "status" in args.write_csv:
+            if "status" in args.csv:
 
                 status = await mc.commands.req_status_sync(
                     contact, timeout=0, min_timeout=10.0
@@ -997,7 +1035,7 @@ async def main():
                 for sensor in sensors:
                     print(f"Found {sensor} sensor!")
 
-            if "mma" in args.write_csv:
+            if "mma" in args.csv:
 
                 # Format sensor headers
                 sensor_header = []
@@ -1045,7 +1083,7 @@ async def main():
         if mc_logger is not None:
             
             if mc_logger.is_logged_in:
-                logout_event = await rpt_logout(mc, contact)
+                logout_event = await node_logout(mc, contact)
 
                 if logout_event == EventType.ERROR:
                     print("Still logged in!")
@@ -1065,70 +1103,59 @@ if __name__ == "__main__":
 
     # * GLOBAL CLI ARGSPARSE BLOCK
     parser = argparse.ArgumentParser(
-        description="Python CLI tool for automated remote data collection over a MeshCore LoRa network."
+        description="Python CLI tool for automated remote data collection over the MeshCore LoRa network."
         )
 
     # Positional argument port
     parser.add_argument("port", help="Serial port (e.g. 'COM4', '/dev/ttyUSB0')")
 
-    # Mutually exclusive device group, either -c/--companion or -r/--repeater
-    device_group = parser.add_mutually_exclusive_group(required=True)
-
-    # Doesn't need password
-    device_group.add_argument(
-        "-c",
-        "--companion",
-        metavar="NAME | KEY",
-        help="Target companion node",
-    )
-
-    # Needs password
-    device_group.add_argument(
-        "-r",
-        "--repeater",
-        metavar="NAME | KEY",
-        help="Target repeater node (-pw/--password required)",
-    )
-
-    # Password has to be provided! if repeater
     parser.add_argument(
-        "-pw", "--password",
+        "-n", 
+        "--node",
+        required=True,
+        metavar="NAME | KEY",
+        help="Target node name or public key prefix"
+    )
+
+    parser.add_argument(
+        "-pw", 
+        "--password",
         default="",
-        help="Password for repeater login (required if -r/--repeater)"
+        help="Password for target node login"
     )
 
     parser.add_argument(
         "-b",
-        "--baudrate",
-        metavar="BAUDRATE",
+        "--baud",
+        metavar="BAUD",
         type=int,
         default=115200,
         help="Serial baudrate (default: 115200)",
     )
 
-    # 'What to do with data' arguments
     parser.add_argument(
         "-l",
         "--listen",
         nargs="+",
+        choices=["telemetry", "status", "mma"],
+        default=[],
         help="Print chosen data to terminal",
-        choices=["telemetry", "status", "mma"],
-        default=[],
     )
+    
     parser.add_argument(
-        "--write-log",
+        "--log",
         nargs="+",
-        help="Write chosen data to .log file",
         choices=["telemetry", "status", "mma"],
         default=[],
-    ),
+        help="Write chosen metrics to .log file(s)"
+    )
 
     parser.add_argument(
-        "--write-csv",
+        "--csv",
         nargs="+",
-        help="Write chosen data to .csv file",
         choices=["telemetry", "status", "mma"],
         default=[],
+        help="Write chosen metrics to .csv file(s)",
     )
 
     parser.add_argument(
@@ -1139,11 +1166,25 @@ if __name__ == "__main__":
         default=1800,
         help="Request frequency in seconds (default: 1800)",
     )
+
     parser.add_argument(
-        "-p",
-        "--path",
+        "-o",
+        "--output",
         default=os.getcwd(),
-        help="Directory for output files (default: current directory)",
+        metavar="DIR",
+        help="Output directory for files (default: current directory)",
+    )
+
+    parser.add_argument(
+        "--log-dir",
+        metavar="DIR",
+        help="[NOT IMPLEMENTED] Override output directory specifically for .log files"
+    )
+
+    parser.add_argument(
+        "--csv-dir",
+        metavar="DIR",
+        help="[NOT IMPLEMENTED] Override output directory specifically for .csv files"
     )
 
     parser.add_argument(
@@ -1152,14 +1193,14 @@ if __name__ == "__main__":
         help="Disconnect from serial port while idle",
     )
 
-        # Mutually exclusive verbosity group, either --verbose or --quiet
+    # Mutually exclusive verbosity group, either --verbose or --quiet
     verbosity_group = parser.add_mutually_exclusive_group(required=False)
 
     verbosity_group.add_argument(
         "-v",
         "--verbose",
         action="store_true",
-        help="Verbose to terminal output",
+        help="Verbose terminal output",
     )
     verbosity_group.add_argument(
         "-q",
@@ -1168,165 +1209,52 @@ if __name__ == "__main__":
         help="Supress terminal output",
     )
 
-    # --interactive cannot be used with quiet
-    parser.add_argument(
-        "-i", "--interactive", action="store_true", help="Enable interactive mode"
-    )
-
     parser.add_argument("-d", "--debug", action="store_true", help="Enable debug mode")
 
     args = parser.parse_args()
 
-    # Argument validity checking
+    #* Argument validity checking
 
-    # Cant use --interactive with --quiet
-    if args.quiet and args.interactive:
-        parser.error("argument -q/--quiet: not allowed with argument -i/--interactive/")
+    # Exit the program if there is nothing to do
+    if not any((args.listen, args.log, args.csv)):
+        parser.error("atleast one the following arguments are required: -l/--listen, --log, --csv ")
 
-    # Cant specify path if not writing
-    if (
-        args.path != os.getcwd()
-        and (args.write_csv == [])
-        and (args.write_log == [])
-    ):
+    # Cant specify output path if not writing
+    if args.output != os.getcwd() and not (args.log or args.csv):
         parser.error(
-            "argument -p/--path: not allowed without argument --write-log | --write-csv"
+            "argument -o/--output: not allowed without argument(s): --log, --csv"
         )
+    
+    if args.log_dir and not args.log:
+        parser.error("argument --log-dir: not allowed without argument: --log")
 
-    # If the user specified path doesn't exist, sys.exit()
-    # If the user didnt use --path flag the default is the current dir which will get through the if statement
-    if not os.path.exists(args.path):
-        parser.error("argument -p/--path: path doesn't exist")
+    if args.csv_dir and not args.csv:
+        parser.error("argument --csv-dir: not allowed without argument: --csv")
 
-    # Cannot get status of a companion only a repeater for some reason :(
-    if "status" in args.listen and args.companion:
+    if not os.path.exists(args.output):
+        parser.error(f"argument -o/--output: path '{args.output}' does not exist")
 
-        parser.error(
-            "argument -c/--companion: not allowed with argument: --listen/-l ['status']"
-        )
+    # If overrides weren't provided default to cwd
+    log_path = Path(args.log_dir) if args.log_dir else Path(args.output)
+    csv_path = Path(args.csv_dir) if args.csv_dir else Path(args.output)
 
-    if "status" in args.write_log and args.companion:
+    # Check if overrides valid
+    if args.log_dir and not log_path.exists():
+        parser.error(f"argument --log-dir: path '{args.log_dir}' does not exist")
 
-        parser.error(
-            "argument -c/--companion: not allowed with argument: --write-log ['status']"
-        )
+    if args.csv_dir and not csv_path.exists():
+        parser.error(f"argument --csv-dir: path '{args.csv_dir}' does not exist")
 
-    if "status" in args.write_csv and args.companion:
-
-        parser.error(
-            "argument -c/--companion: not allowed  with argument: --write-csv ['status']"
-        )
-
-    # Verbosity modes
-
+    # Modes
     if args.quiet:
         print("Running in quiet mode...")
-
-    if args.debug:
-        print("Running in debug mode!")
-
-    if args.interactive:
-        print("Running in interactive mode!")
 
     if args.verbose:
         print("Running in verbose mode!")
 
-        print("Printing active flags and their values if active!")
-
-        # -c/--companion active
-        if args.companion:
-            print(
-                f"Flag '-c/--companion' is active, will try to find target companion in contacts using {args.companion!r}"
-            )
-
-        # -r/--repeater active
-        elif args.repeater:
-            print(
-                f"Flag '-r/--repeater' is active, will try to find target repeater in contacts using {args.repeater!r}"
-            )
-
-            if args.password != "":
-                print(
-                    f"Flag '-pw/--password' is active, will try to login with {args.password!r}"
-                )
-
-            else:
-                print(
-                    f"Flag '-pw/--password' is not active, will try to login without password"
-                    )
-
-        if args.baudrate != 115200:
-
-            print(f"Flag '-b/--baudrate' is active, set to {args.baudrate!r}")
-
-        else:
-            print(
-                f"Flag '-b/--baudrate' is not active, baudrate set to default: {args.baudrate}"
-            )
-
-        if args.listen:
-
-            print("Flag '-l/--listen' is active, will print", end=" ")
-            print(*[f"{arg} data" for arg in args.listen], sep=", ")
-
-        if args.write_log:
-
-            print(f"Flag '--write-log' is active, will collect", end=" ")
-            print(*[f"{arg} data" for arg in args.write_log], sep=", ")
-
-        if args.write_csv:
-
-            print(f"Flag '--write-csv' is active, will collect", end=" ")
-            print(*[f"{arg} data" for arg in args.write_csv], sep=", ")
-
-        if args.frequency != 1800:
-            print(
-                f"Flag '-f/--frequency' is active, will request data every {args.frequency} seconds"
-            )
-        else:
-            print(
-                f"Flag '-f/--frequency' is not active, frequency set to default: {args.frequency} seconds"
-            )
-
-        if args.path != os.getcwd():
-            print(f"Flag '-p/--path' is active, will save files to {args.path!r}")
-
-        # If args.path is the current working dir just print the cwd 
-        else:
-
-            if (args.write_log != [] or args.write_csv != []):
-                print(
-                    f"Flag '-p/--path' is not active, will save files to the current working directory:",
-                    f"cwd={os.getcwd()!r}",
-                    sep="\n"
-                )
-
-        if args.disconnect_while_idle:
-            print(
-                f"Flag '--disconnect-while-idle' is active! Will disconnect after all tasks are done and connect before the next cycle."
-            )
-
-    if args.interactive:
-        print("Continue with specified arguments?", end=" ")
-
-        while True:
-            try:
-                if strtobool(input("(Y/n) "), default_val=True):
-                    break
-
-                else:
-                    raise SystemExit
-
-            except ValueError:
-                print("Please choose a valid option.", end=" ")
-
-            except SystemExit:
-                print("Exited.")
-                sys.exit()
-
-            except KeyboardInterrupt:
-                print("\nProgram cancelled by user.")
-                sys.exit()
+    if args.debug:
+        print("Running in debug mode!")
+        print(f"Debug: Parsed configuration: {vars(args)}")
 
     # * START PROGRAM
 
