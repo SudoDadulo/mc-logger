@@ -530,7 +530,7 @@ async def req_telemetry(
             try:
                 
                 request = await mc.commands.req_telemetry_sync(
-                    contact, timeout=40, min_timeout=40.0
+                    contact, timeout=0, min_timeout=5.0
                 )
 
                 if request is not None:
@@ -729,11 +729,6 @@ async def req_mma(
         loop_finish_time = time.monotonic() - loop_start_time
         await asyncio.sleep(max(0.0, frequency - loop_finish_time))
 
-async def parse_telemetry():
-    ...
-
-async def parse_mma():
-    ...
 
 # * LOGIN AND LOGOUT
 async def node_login(
