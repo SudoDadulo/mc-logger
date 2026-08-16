@@ -151,19 +151,13 @@ class MeshCoreLogger:
 
         timestamp = dt.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
 
-        # Extract sensor types and corresponding values
-        sensors = [sensor["type"] for sensor in lpp_data]
-        values = [value["value"] for value in lpp_data]
-
-        # Combine lists into a dict
-        sensor_values = dict(zip(sensors, values))
-
         if "telemetry" in self.args.listen:
 
             print(f"\nReceived telemetry at '{timestamp}':\n")
 
-            for sensor in sensor_values:
-                print(f"{sensor} = {sensor_values[sensor]}")
+            for channel_data in lpp_data:
+                print(f"Channel {channel_data['channel']}: "
+                    f"{channel_data['type']} = {channel_data['value']}")
 
         if "telemetry" in self.args.log:
             write_line(event.payload, timestamp, self.get_path("telemetry", "log"))
@@ -172,6 +166,11 @@ class MeshCoreLogger:
                 print("\nTelemetry data written to log file.")
 
         if "telemetry" in self.args.csv:
+            
+            sensor_values = {
+                f"ch{sensor['channel']}_{sensor['type']}": sensor["value"] for sensor in lpp_data
+            }
+
             write_row(sensor_values, timestamp, self.get_path("telemetry", "csv"))
 
             if not self.args.quiet:
@@ -531,7 +530,7 @@ async def req_telemetry(
             try:
                 
                 request = await mc.commands.req_telemetry_sync(
-                    contact, timeout=0, min_timeout=5.0
+                    contact, timeout=40, min_timeout=40.0
                 )
 
                 if request is not None:
@@ -729,6 +728,12 @@ async def req_mma(
         # Calculate time it took to finish request and subtract it from the frequency
         loop_finish_time = time.monotonic() - loop_start_time
         await asyncio.sleep(max(0.0, frequency - loop_finish_time))
+
+async def parse_telemetry():
+    ...
+
+async def parse_mma():
+    ...
 
 # * LOGIN AND LOGOUT
 async def node_login(
@@ -962,13 +967,15 @@ async def main():
             # Write telemetry csv header
             if "telemetry" in args.csv:
 
-                header: list = write_header(
-                    mc_logger.get_path("telemetry", "csv"), sensors
+                header = [f"ch{sensor['channel']}_{sensor['type']}" for sensor in telemetry]
+
+                fieldnames: list = write_header(
+                    mc_logger.get_path("telemetry", "csv"), header
                     )
 
                 if args.verbose:
                     print("Telemetry csv header:", end=" ")
-                    print(*header, sep=", ")
+                    print(*fieldnames, sep=", ")
 
             # Subscribe to event
             mc.subscribe(EventType.TELEMETRY_RESPONSE, mc_logger.on_telemetry)
@@ -997,13 +1004,13 @@ async def main():
                     print("Failed to get status! Please try again!")
                     return
 
-                header: list = write_header(
+                fieldnames: list = write_header(
                     mc_logger.get_path("status", "csv"), status
                 )
 
                 if args.verbose:
                     print("Status csv header:", end=" ")
-                    print(*header, sep=", ")
+                    print(*fieldnames, sep=", ")
 
             # Subscribe to event
             mc.subscribe(EventType.STATUS_RESPONSE, mc_logger.on_status)
