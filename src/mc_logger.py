@@ -5,6 +5,7 @@ import datetime as dt
 import time
 import sys
 import os
+import json
 
 from pathlib import Path
 
@@ -415,7 +416,7 @@ def write_line(data: dict, timestamp: str, path: Path) -> None:
     """
     with open(path, "a", newline="") as logfile:
         logline = {"timestamp": timestamp} | data
-        logfile.write(f"{str(logline)}\n")
+        logfile.write(f"{json.dumps(logline)}\n")
 
 
 def write_row(data: dict, timestamp: str, path: Path) -> None:
@@ -918,7 +919,15 @@ async def main():
                 
                 if metric in arg:
 
-                    path = create_file(metric, ext, args.output)
+                    if ext == "log" and args.log_dir:
+                        path = create_file(metric, ext, args.log_dir)
+                    
+                    elif ext == "csv" and args.csv_dir:
+                        path = create_file(metric, ext, args.csv_dir)
+
+                    else:
+                        path = create_file(metric, ext, args.output)
+                        
                     mc_logger.store_path(metric, ext, path)
 
                     if not args.quiet:
@@ -1178,13 +1187,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--log-dir",
         metavar="DIR",
-        help="[NOT IMPLEMENTED] Override output directory specifically for .log files"
+        help="Override output directory specifically for .log files"
     )
 
     parser.add_argument(
         "--csv-dir",
         metavar="DIR",
-        help="[NOT IMPLEMENTED] Override output directory specifically for .csv files"
+        help="Override output directory specifically for .csv files"
     )
 
     parser.add_argument(
