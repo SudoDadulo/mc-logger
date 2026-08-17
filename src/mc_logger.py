@@ -18,7 +18,7 @@ from runtime_tracker import RuntimeTracker
 
 CONTACT_TYPES = {
     0: "NO_TYPE",
-    1: "COMP",
+    1: "CLI",
     2: "REPEAT",
     3: "ROOM",
     4: "SENS",
@@ -441,7 +441,7 @@ def get_sleep_duration(anchor: float) -> float:
 
 def print_next_request(sleep_duration: float, metric: str) -> None:
     next_request = dt.datetime.now() + dt.timedelta(seconds=round(sleep_duration))
-    print(f"\nNext {metric} request at {next_request.strftime('%Y-%m-%dT%H:%M:%S')}")
+    print(f"\nNext {metric} request at {next_request:%Y-%m-%dT%H:%M:%S}")
 
 # * TASKS
 async def idle(
@@ -542,7 +542,7 @@ async def req_telemetry(
             try:
                 
                 request = await mc.commands.req_telemetry_sync(
-                    contact, timeout=0, min_timeout=5.0
+                    contact, timeout=0, min_timeout=mc_logger.args.timeout
                 )
 
                 if request is not None:
@@ -559,7 +559,7 @@ async def req_telemetry(
 
         if request is None and mc.is_connected:
             
-            if mc_logger.contact_typename == "COMP":
+            if mc_logger.contact_typename == "CLI":
                 print("Error: The companion may be unreachable or you don't have the permission to access telemetry.")
 
             else:
@@ -574,7 +574,6 @@ async def req_telemetry(
         if not mc_logger.args.quiet:
             print_next_request(sleep_duration, "telemetry")
 
-        # sleep_duration = max(0.0, anchor_time - time.monotonic())
         await asyncio.sleep(sleep_duration)
 
 
@@ -633,7 +632,7 @@ async def req_status(
             try:
                 
                 request = await mc.commands.req_status_sync(
-                    contact, timeout=0, min_timeout=5.0
+                    contact, timeout=0, min_timeout=mc_logger.args.timeout
                 )
 
                 if request is not None:
@@ -719,7 +718,11 @@ async def req_mma(
             try:
                 
                 request = await mc.commands.req_mma_sync(
-                    contact, start_time, end_time, timeout=0, min_timeout=10.0
+                    contact, 
+                    start_time, 
+                    end_time, 
+                    timeout=0, 
+                    min_timeout=mc_logger.args.timeout
                 )
 
                 if request is not None:
@@ -903,13 +906,13 @@ async def main():
             print(f"Error: Unsupported node type: {mc_logger.contact_typename}")
             return
         
-        # # Exit early if the node type doesn't allow for status
-        # if mc_logger.contact_typename in ("COMP", "SENS") and "status" in (args.log, args.csv):
-        #     print("Error: Companion/Sensor nodes don't support requesting status.")
-        #     return
+        # Exit early if the node type doesn't allow for status
+        if mc_logger.contact_typename in ("CLI", "SENS") and "status" in (args.log, args.csv):
+            print("Error: Companion/Sensor nodes don't support requesting status.")
+            return
 
         # Exit early if mma from comp or repeat
-        if mc_logger.contact_typename in ("COMP", "REPEAT") and "mma" in (args.log, args.csv):
+        if mc_logger.contact_typename in ("CLI", "REPEAT") and "mma" in (args.log, args.csv):
             print("Error: Companion/Repeater nodes don't support requesting Min/Max/Avg.")
             return
 
@@ -1113,6 +1116,12 @@ async def main():
                 0, idle(mc, args.frequency, mc_logger)
                 )
 
+        if args.start_at:
+            sleep_until = (args.start_at - dt.datetime.now()).total_seconds()
+
+            print(f"Starting request loop at {args.start_at.strftime('%Y-%m-%dT%H:%M:%S')}")
+            await asyncio.sleep(sleep_until)
+
         #* START TASKS
         await asyncio.gather(*mc_logger.tasks)
 
@@ -1217,6 +1226,23 @@ if __name__ == "__main__":
         default=1800,
         help="Request frequency in seconds (default: 1800)",
     )
+    
+
+    parser.add_argument(
+        "-t", 
+        "--timeout",
+        metavar="SECONDS",
+        type=float,
+        default=10.0,
+        help="Set timeout in seconds (default: 10)"
+    )
+
+    parser.add_argument(
+        "--start-at",
+        metavar="DATETIME",
+        type=dt.datetime.fromisoformat,
+        help="Delay request loop start until datetime (YYYY-MM-DDTHH:MM:SS)",
+    )
 
     parser.add_argument(
         "-o",
@@ -1293,7 +1319,7 @@ if __name__ == "__main__":
 
     #* PARSE ARGS
     args = parser.parse_args()
-    
+
     if config_args.config:
         if not args.quiet:
             print(f"Using configuration from {config_args.config!r}")
@@ -1369,6 +1395,13 @@ if __name__ == "__main__":
 
     if args.csv_dir and not csv_path.exists():
         parser.error(f"argument --csv-dir: path {args.csv_dir!r} does not exist")
+
+    if args.start_at:
+        sleep_until = (args.start_at - dt.datetime.now()).total_seconds()
+        if sleep_until < 60.0:
+            parser.error(
+                f"argument --start-at: datetime must be at least 60 seconds in the future"
+            )
 
     # Modes
     if args.quiet:
