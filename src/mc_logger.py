@@ -361,7 +361,7 @@ def create_file(metric: str, file_type: str, path: str) -> Path:
 
     path = Path(path)
 
-    # Generate file name with this naming scheme: "mc_data_filetype_yyyymmdd_HHMMSS.ext" e. g. "mc_telemetry_log_20260101_123030.log"
+    # Generate file name with this naming scheme: "mc_metric_log_yyyymmdd_HHMMSS.ext" e. g. "mc_telemetry_log_20260101_123030.log"
     file_name = (
         f"mc_{metric}_log_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.{file_type}"
     )
@@ -435,6 +435,13 @@ def write_row(data: dict, timestamp: str, path: Path) -> None:
 
         writer.writerow({"timestamp": timestamp} | data)
 
+def get_sleep_duration(anchor: float) -> float:
+    return max(0.0, anchor - time.monotonic())
+
+def print_next_request(sleep_duration: float, metric: str) -> None:
+    next_request = dt.datetime.now() + dt.timedelta(seconds=round(sleep_duration))
+    print(f"\nNext {metric} request at {next_request.strftime('%Y-%m-%dT%H:%M:%S')}")
+
 # * TASKS
 async def idle(
     mc: MeshCore, 
@@ -502,11 +509,12 @@ async def req_telemetry(
     Returns:
         None
     """
+
+    anchor_time = time.monotonic()
+
     while True:
 
-        loop_start_time = time.monotonic()
-
-        next_request = dt.datetime.now() + dt.timedelta(seconds=frequency)
+        anchor_time += frequency
 
         # Ensure login, sleeps if failure, returns true if node doesnt need login
         if not await mc_logger.ensure_logged_in():
@@ -514,9 +522,12 @@ async def req_telemetry(
             
             completion_flag.set()
 
-            loop_finish_time = time.monotonic() - loop_start_time
-            await asyncio.sleep(max(0.0, frequency - loop_finish_time))
-
+            sleep_duration = get_sleep_duration(anchor_time)
+            
+            if not mc_logger.args.quiet:
+                print_next_request(sleep_duration, "telemetry")
+            
+            await asyncio.sleep(sleep_duration)
             continue
 
         if not mc_logger.args.quiet:
@@ -557,13 +568,13 @@ async def req_telemetry(
         # Signal completion even if fail to not stall forever
         completion_flag.set()
 
-        # Print next request datetime 
-        if not mc_logger.args.quiet:
-            print(f"\nRequesting telemetry again at {next_request.strftime('%Y-%m-%d %H:%M:%S')}")
+        sleep_duration = get_sleep_duration(anchor_time)
 
-        # Calculate time it took to finish request and subtract it from the frequency
-        loop_finish_time = time.monotonic() - loop_start_time
-        await asyncio.sleep(max(0.0, frequency - loop_finish_time))
+        if not mc_logger.args.quiet:
+            print_next_request(sleep_duration, "telemetry")
+
+        # sleep_duration = max(0.0, anchor_time - time.monotonic())
+        await asyncio.sleep(sleep_duration)
 
 
 async def req_status(
@@ -586,11 +597,15 @@ async def req_status(
     Returns:
         None
     """
+
+    # Set absolute starting time aka anchor e. g. T = 100 s
+    anchor_time = time.monotonic()
+
     while True:
 
-        loop_start_time = time.monotonic()
-
-        next_request = dt.datetime.now() + dt.timedelta(seconds=frequency)
+        # add the frequency to calculate when the next loop *must* begin
+        # if f = 1800 s -> T = 1900 s
+        anchor_time += frequency
 
         # Ensure repeater login, sleeps if failure, returns true if repeater
         if not await mc_logger.ensure_logged_in():
@@ -598,9 +613,12 @@ async def req_status(
             
             completion_flag.set()
 
-            loop_finish_time = time.monotonic() - loop_start_time
-            await asyncio.sleep(max(0.0, frequency - loop_finish_time))
+            sleep_duration = get_sleep_duration(anchor_time)
 
+            if not mc_logger.args.quiet:
+                print_next_request(sleep_duration, "status")
+
+            await asyncio.sleep(sleep_duration)
             continue
 
         if not mc_logger.args.quiet:
@@ -637,13 +655,12 @@ async def req_status(
         # Signal completion even if fail to not stall forever
         completion_flag.set()
 
-        # Print next request datetime 
-        if not mc_logger.args.quiet:
-            print(f"\nRequesting status again at {next_request.strftime('%Y-%m-%d %H:%M:%S')}")
+        sleep_duration = get_sleep_duration(anchor_time)
 
-        # Calculate time it took to finish request and subtract it from the frequency
-        loop_finish_time = time.monotonic() - loop_start_time
-        await asyncio.sleep(max(0.0, frequency - loop_finish_time))
+        if not mc_logger.args.quiet:
+            print_next_request(sleep_duration, "status")
+
+        await asyncio.sleep(sleep_duration)
 
 
 async def req_mma(
@@ -661,27 +678,30 @@ async def req_mma(
         contact (dict): Target contact from which to request Min/Max/Avg telemetry.
         frequency (int): Interval in seconds between Min/Max/Avg requests.
         mc_logger (MeshCoreLogger): MeshCoreLogger instance containing the state.
-        sync_event (asyncio.Event): Event flag signaled when the request cycle completes.
+        completion_flag (asyncio.Event): Event flag signaled when the request cycle completes or fails.
 
     Returns:
         None
     """
+    
+    anchor_time = time.monotonic()
+    
     while True:
 
-        loop_start_time = time.monotonic()
+        anchor_time += frequency
 
-        next_request = dt.datetime.now() + dt.timedelta(seconds=frequency)
-
-    
         # Ensure repeater login, sleeps if failure, returns true if repeater
         if not await mc_logger.ensure_logged_in():
             print("Warning: Skipping Min/Max/Avg request due to login failure.")
             
             completion_flag.set()
 
-            loop_finish_time = time.monotonic() - loop_start_time
-            await asyncio.sleep(max(0.0, frequency - loop_finish_time))
+            sleep_duration = get_sleep_duration(anchor_time)
+        
+            if not mc_logger.args.quiet:
+                print_next_request(sleep_duration, "Min/Max/Avg")
 
+            await asyncio.sleep(sleep_duration)
             continue
 
         if not mc_logger.args.quiet:
@@ -691,7 +711,7 @@ async def req_mma(
         start_time = end_time - frequency
 
         request = None
-        for attempt in range(4): # first status request attempt + 3 retries
+        for attempt in range(4): # first request attempt + 3 retries
             if attempt > 0:
                 print(f"Retrying Min/Max/Avg request... (Attempt {attempt}/3)")
     
@@ -721,13 +741,12 @@ async def req_mma(
         # Signal completion even if fail to not stall forever
         completion_flag.set()
 
-        # Print next request datetime 
+        sleep_duration = get_sleep_duration(anchor_time)
+        
         if not mc_logger.args.quiet:
-            print(f"\nRequesting Min/Max/Avg again at {next_request.strftime('%Y-%m-%d %H:%M:%S')}")
+            print_next_request(sleep_duration, "Min/Max/Avg")
 
-        # Calculate time it took to finish request and subtract it from the frequency
-        loop_finish_time = time.monotonic() - loop_start_time
-        await asyncio.sleep(max(0.0, frequency - loop_finish_time))
+        await asyncio.sleep(sleep_duration)
 
 
 # * LOGIN AND LOGOUT
@@ -878,14 +897,24 @@ async def main():
         # * Instantiate the MeshCoreLogger class
         mc_logger = MeshCoreLogger(mc, contact, args)
 
-        # Subscribe to connection status events
-        mc.subscribe(EventType.CONNECTED, mc_logger.on_connected)
-        mc.subscribe(EventType.DISCONNECTED, mc_logger.on_disconnected)
-
         # Unsupported node types
         if mc_logger.contact_typename in ("NO_TYPE", "ROOM", "UNKNOWN"):
             print(f"Error: Unsupported node type: {mc_logger.contact_typename}")
             return
+        
+        # # Exit early if the node type doesn't allow for status
+        # if mc_logger.contact_typename in ("COMP", "SENS") and "status" in (args.log, args.csv):
+        #     print("Error: Companion/Sensor nodes don't support requesting status.")
+        #     return
+
+        # Exit early if mma from comp or repeat
+        if mc_logger.contact_typename in ("COMP", "REPEAT") and "mma" in (args.log, args.csv):
+            print("Error: Companion/Repeater nodes don't support requesting Min/Max/Avg.")
+            return
+
+        # Subscribe to connection events, before login to allow reconnnect as early
+        mc.subscribe(EventType.CONNECTED, mc_logger.on_connected)
+        mc.subscribe(EventType.DISCONNECTED, mc_logger.on_disconnected)
 
         # Nodes that need login
         if mc_logger.contact_typename in ("REPEAT", "SENS"):
