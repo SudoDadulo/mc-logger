@@ -1,1 +1,3 @@
-meshcore
+meshcore==2.3.8
+pyserial==3.5
+pytest==9.0.3

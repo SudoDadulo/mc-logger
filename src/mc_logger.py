@@ -6,6 +6,7 @@ import time
 import sys
 import os
 import json
+import serial
 
 from pathlib import Path
 
@@ -76,7 +77,7 @@ class MeshCoreLogger:
             try:
                 
                 line_count = 0
-                with open(path, "r") as file:
+                with open(path, "r", encoding="utf-8") as file:
 
                     for line_count, _ in enumerate(file, start=1):
                         pass  # Just iterate
@@ -395,7 +396,7 @@ def create_file(metric: str, file_type: str, path: str) -> Path:
 
 def write_header(path, fieldnames: list) -> list[str]:
     
-    with open(path, "w", newline="") as csvfile:
+    with open(path, "w", newline="", encoding="utf-8") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=["timestamp", *fieldnames])
         writer.writeheader()
 
@@ -413,7 +414,7 @@ def write_line(data: dict, timestamp: str, path: Path) -> None:
     Returns:
         None
     """
-    with open(path, "a", newline="") as logfile:
+    with open(path, "a", newline="", encoding="utf-8") as logfile:
         logline = {"timestamp": timestamp} | data
         logfile.write(f"{json.dumps(logline)}\n")
 
@@ -430,7 +431,7 @@ def write_row(data: dict, timestamp: str, path: Path) -> None:
     Returns:
         None
     """
-    with open(path, "a", newline="") as csvfile:
+    with open(path, "a", newline="",encoding="utf-8") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=["timestamp", *data])
 
         writer.writerow({"timestamp": timestamp} | data)
@@ -1141,18 +1142,28 @@ async def main():
 
 if __name__ == "__main__":
 
-    # * GLOBAL CLI ARGSPARSE BLOCK
+    #* CONFIG PARSER
+    config_parser = argparse.ArgumentParser(add_help=False)
+
+    config_parser.add_argument("--config", type=Path,)
+    
+    config_args, _ = config_parser.parse_known_args()
+
+    # * MAIN PARSER
     parser = argparse.ArgumentParser(
         description="Python CLI tool for automated remote data collection over the MeshCore LoRa network."
         )
 
     # Positional argument port
-    parser.add_argument("port", help="Serial port (e.g. 'COM4', '/dev/ttyUSB0')")
+    parser.add_argument(
+        "port", 
+        nargs="?",
+        help="Serial port (e.g. 'COM4', '/dev/ttyUSB0')"
+    )
 
     parser.add_argument(
         "-n", 
         "--node",
-        required=True,
         metavar="NAME | KEY",
         help="Target node name or public key prefix"
     )
@@ -1233,6 +1244,20 @@ if __name__ == "__main__":
         help="Disconnect from serial port while idle",
     )
 
+    parser.add_argument(
+        "--config",
+        type=Path,
+        metavar="PATH",
+        help="Path to JSON configuration file"
+    )
+
+    parser.add_argument(
+        "--save-config",
+        type=Path,
+        metavar="PATH",
+        help="Save current configuration to a JSON file"
+    )
+
     # Mutually exclusive verbosity group, either --verbose or --quiet
     verbosity_group = parser.add_mutually_exclusive_group(required=False)
 
@@ -1251,13 +1276,73 @@ if __name__ == "__main__":
 
     parser.add_argument("-d", "--debug", action="store_true", help="Enable debug mode")
 
+    # Load configuration from file before parsing
+    if config_args.config:
+
+        if not config_args.config.is_file():
+            parser.error(f"argument --config: path {config_args.config!r} does not exist")
+
+        try:
+
+            with open(config_args.config, "r", encoding="utf-8") as f:
+                config = json.load(f)
+                parser.set_defaults(**config)
+
+        except json.JSONDecodeError as e:
+            parser.error(f"argument --config: invalid JSON file {config_args.config!r}: {e}")
+
+    #* PARSE ARGS
     args = parser.parse_args()
+    
+    if config_args.config:
+        if not args.quiet:
+            print(f"Using configuration from {config_args.config!r}")
+
+    if args.save_config:
+        
+        if not args.save_config.suffix.lower() != "json":
+            parser.error(
+                "argument --save-config: configuration file must have a .json extension"
+                )
+
+        config = {}
+            
+        for key, value in vars(args).items():
+                
+            if key in ("config", "save_config"):
+                continue
+
+            if value in (None, False, []):
+                continue
+
+            if isinstance(value, Path):
+                value = str(value)
+
+            config[key] = value
+
+        with open(args.save_config, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=4)
+
+        if not args.quiet:
+            print(f"Configuration saved to JSON file: {args.save_config}")
 
     #* Argument validity checking
 
+    if not args.port or not args.node:
+        parser.error("missing required argument(s): port, -n/--node")
+
+    # Test if port is valid before proceeding
+    if args.port:
+
+        try:
+            with serial.Serial(args.port) as ser: pass
+
+        except SerialException as e:
+            parser.error(f"argument port: cannot open {args.port!r} ({e})")
+
     # Exit the program if there is nothing to do
     if not any((args.listen, args.log, args.csv)):
-        parser.error("atleast one the following arguments are required: -l/--listen, --log, --csv ")
+        parser.error("atleast one the following arguments is required: -l/--listen, --log, --csv")
 
     # Cant specify output path if not writing
     if args.output != os.getcwd() and not (args.log or args.csv):
@@ -1272,7 +1357,7 @@ if __name__ == "__main__":
         parser.error("argument --csv-dir: not allowed without argument: --csv")
 
     if not os.path.exists(args.output):
-        parser.error(f"argument -o/--output: path '{args.output}' does not exist")
+        parser.error(f"argument -o/--output: path {args.output!r} does not exist")
 
     # If overrides weren't provided default to cwd
     log_path = Path(args.log_dir) if args.log_dir else Path(args.output)
@@ -1280,10 +1365,10 @@ if __name__ == "__main__":
 
     # Check if overrides valid
     if args.log_dir and not log_path.exists():
-        parser.error(f"argument --log-dir: path '{args.log_dir}' does not exist")
+        parser.error(f"argument --log-dir: path {args.log_dir!r} does not exist")
 
     if args.csv_dir and not csv_path.exists():
-        parser.error(f"argument --csv-dir: path '{args.csv_dir}' does not exist")
+        parser.error(f"argument --csv-dir: path {args.csv_dir!r} does not exist")
 
     # Modes
     if args.quiet:
