@@ -4,5 +4,4 @@ __pycache__/
 *.log
 *.csv
 
-!example_logs/
-!example_logs/*
+temp/

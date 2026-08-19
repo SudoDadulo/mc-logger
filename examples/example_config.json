@@ -4,6 +4,6 @@
     "password": "password",
     "listen": ["telemetry"],
     "log": ["telemetry"],
-    "output": "/home/user/logs",
-    "verbose": "True"
+    "output": "/path/to/log_directory",
+    "verbose": true
 }

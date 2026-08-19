@@ -362,7 +362,8 @@ def create_file(metric: str, file_type: str, path: str) -> Path:
 
     path = Path(path)
 
-    # Generate file name with this naming scheme: "mc_metric_log_yyyymmdd_HHMMSS.ext" e. g. "mc_telemetry_log_20260101_123030.log"
+    # Generate file name with this naming scheme: 
+    # "mc_metric_log_yyyymmdd_HHMMSS.ext" e. g. "mc_telemetry_log_20260101_123030.log"
     file_name = (
         f"mc_{metric}_log_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.{file_type}"
     )
@@ -373,7 +374,8 @@ def create_file(metric: str, file_type: str, path: str) -> Path:
         with open(f"{abs_file_path}", "x"):
             pass
 
-    # Exception that practically never gets raised as with the current naming scheme it never has the same file name
+    # Exception that practically never gets raised 
+    # as with the current naming scheme it never has the same file name
     except FileExistsError:
         print("File already exists. Continue?", end=" ")
         while True:
@@ -439,7 +441,7 @@ def write_row(data: dict, timestamp: str, path: Path) -> None:
 def get_sleep_duration(anchor: float) -> float:
     return max(0.0, anchor - time.monotonic())
 
-def print_next_request(sleep_duration: float, metric: str) -> None:
+def print_next_request_time(sleep_duration: float, metric: str) -> None:
     next_request = dt.datetime.now() + dt.timedelta(seconds=round(sleep_duration))
     print(f"\nNext {metric} request at {next_request:%Y-%m-%dT%H:%M:%S}")
 
@@ -526,7 +528,7 @@ async def req_telemetry(
             sleep_duration = get_sleep_duration(anchor_time)
             
             if not mc_logger.args.quiet:
-                print_next_request(sleep_duration, "telemetry")
+                print_next_request_time(sleep_duration, "telemetry")
             
             await asyncio.sleep(sleep_duration)
             continue
@@ -572,7 +574,7 @@ async def req_telemetry(
         sleep_duration = get_sleep_duration(anchor_time)
 
         if not mc_logger.args.quiet:
-            print_next_request(sleep_duration, "telemetry")
+            print_next_request_time(sleep_duration, "telemetry")
 
         await asyncio.sleep(sleep_duration)
 
@@ -616,7 +618,7 @@ async def req_status(
             sleep_duration = get_sleep_duration(anchor_time)
 
             if not mc_logger.args.quiet:
-                print_next_request(sleep_duration, "status")
+                print_next_request_time(sleep_duration, "status")
 
             await asyncio.sleep(sleep_duration)
             continue
@@ -658,7 +660,7 @@ async def req_status(
         sleep_duration = get_sleep_duration(anchor_time)
 
         if not mc_logger.args.quiet:
-            print_next_request(sleep_duration, "status")
+            print_next_request_time(sleep_duration, "status")
 
         await asyncio.sleep(sleep_duration)
 
@@ -699,7 +701,7 @@ async def req_mma(
             sleep_duration = get_sleep_duration(anchor_time)
         
             if not mc_logger.args.quiet:
-                print_next_request(sleep_duration, "Min/Max/Avg")
+                print_next_request_time(sleep_duration, "Min/Max/Avg")
 
             await asyncio.sleep(sleep_duration)
             continue
@@ -748,7 +750,7 @@ async def req_mma(
         sleep_duration = get_sleep_duration(anchor_time)
         
         if not mc_logger.args.quiet:
-            print_next_request(sleep_duration, "Min/Max/Avg")
+            print_next_request_time(sleep_duration, "Min/Max/Avg")
 
         await asyncio.sleep(sleep_duration)
 
@@ -1227,7 +1229,6 @@ if __name__ == "__main__":
         help="Request frequency in seconds (default: 1800)",
     )
     
-
     parser.add_argument(
         "-t", 
         "--timeout",
@@ -1312,6 +1313,23 @@ if __name__ == "__main__":
 
             with open(config_args.config, "r", encoding="utf-8") as f:
                 config = json.load(f)
+
+                if config.get("start_at"):
+                    
+                    # Convert datetime strs to datetime objects
+                    try:
+                        config["start_at"] = dt.datetime.fromisoformat(config["start_at"])
+                    
+                    except ValueError as e:
+                        parser.error(
+                            f"argument --config: invalid datetime for 'start_at' in {config_args.config!r}: {e}"
+                        )
+                    
+                    # Convert path strs to Path objects
+                    for path_to in ("log_dir", "csv_dir", "save_config"):
+                        if config.get(path_to):
+                            config[path_to] = Path(config[path_to])
+                
                 parser.set_defaults(**config)
 
         except json.JSONDecodeError as e:
@@ -1326,7 +1344,7 @@ if __name__ == "__main__":
 
     if args.save_config:
         
-        if not args.save_config.suffix.lower() != "json":
+        if args.save_config.suffix.lower() != ".json":
             parser.error(
                 "argument --save-config: configuration file must have a .json extension"
                 )
@@ -1334,12 +1352,15 @@ if __name__ == "__main__":
         config = {}
             
         for key, value in vars(args).items():
-                
+            
             if key in ("config", "save_config"):
                 continue
 
             if value in (None, False, []):
                 continue
+            
+            if isinstance(value, dt.datetime):
+                value = value.isoformat()
 
             if isinstance(value, Path):
                 value = str(value)
