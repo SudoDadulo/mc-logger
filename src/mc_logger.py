@@ -16,6 +16,7 @@ from meshcore import MeshCore, EventType
 
 from runtime_tracker import RuntimeTracker
 
+# This dict holds the mappings to the "type" field in a contact dict
 CONTACT_TYPES = {
     0: "NO_TYPE",
     1: "CLI",
@@ -51,22 +52,29 @@ class MeshCoreLogger:
     def add_metric(self, metric) -> None:
         self.metrics.append(metric)
 
-    def add_task(self, task) -> None:
+    def add_task(self, task: asyncio.coroutine) -> None:
+        """Append a task to tasks"""
         self.tasks.append(task)
 
     def store_path(self, metric: str, file_ext: str, path: Path) -> None:
+        """
+        Store file path as a value in output_paths = dict[tuple[metric, file_ext] = path].
+        """
         self.output_paths[(metric, file_ext)] = path
 
     def get_path(self, metric: str, file_ext: str) -> Path | None:
+        """Return path associated with the metric and the file extension."""
         return self.output_paths.get((metric, file_ext))
 
     def create_completion_flag(self):
+        """Create an asyncio.Event() object used for tracking task (asyncio.coroutine) completion"""
         event = asyncio.Event()
         self.completion_flags.append(event)
         return event
 
     def print_file_stats(self):
-        
+        """Print the file statistics if any files were written to."""
+
         # If no files written
         if not self.output_paths:
             return
@@ -105,19 +113,25 @@ class MeshCoreLogger:
 
     async def ensure_logged_in(self) -> bool:
 
+        # If the device doesn't need login
         if self.contact_typename not in ("REPEAT", "SENS") or self._logged_in:
             return True
         
         login = await node_login(self.mc, self.contact, self.args.password)
 
+        # Sets the device state as logged in
         if login is not None:
             self._logged_in = True
             return True
 
+        # Sets the device login state as not logged in
         self._logged_in = False
         return False
 
+    #* EVENT HANDLERS
+
     async def on_connected(self, event):
+        """Handle a connection event"""
         print(f"Connected: {event.payload}")
         
         if event.payload.get('reconnected'):
@@ -126,6 +140,7 @@ class MeshCoreLogger:
                 print("Successfully reconnected!")
 
     async def on_disconnected(self, event):
+        """Handle a disconnection event"""
         print(f"Disconnected: {event.payload['reason']}")
         
         if event.payload.get('max_attempts_exceeded'):
@@ -168,6 +183,8 @@ class MeshCoreLogger:
 
         if "telemetry" in self.args.csv:
             
+            # Format the data into a dict (channel number and sensor type): value
+            # e. g. "ch1_temperature": 25.0
             sensor_values = {
                 f"ch{sensor['channel']}_{sensor['type']}": sensor["value"] for sensor in lpp_data
             }
@@ -306,7 +323,7 @@ class MeshCoreLogger:
 # * STRTOBOOL FUNCTION
 def strtobool(val: str, default_val: bool | None = None) -> bool:
     """
-    Convert string into a bool.
+    Convert string into a Boolean value.
 
     Args:
         val (str): String to convert.
@@ -343,13 +360,13 @@ def strtobool(val: str, default_val: bool | None = None) -> bool:
 
 
 # * FILE MANIPULATION
-def create_file(metric: str, file_type: str, path: str) -> Path:
+def create_file(metric: str, file_ext: str, path: Path) -> Path:
     """
     Try to create file on path with naming scheme: 'mc_{data}_log_yyyymmdd_HHMMSS.{file_type}'.
 
     Args:
-        file_type (str): 'log' or 'csv' or any file extension
-        data (str): type of data the file is going to store e.g. 'telemetry'
+        metric (str): Type of data the file is going to store e.g. 'telemetry'
+        file_ext (str): 'log' or 'csv' or any file extension without the period
         path (Path): Path to file directory
 
     Returns:
@@ -359,15 +376,16 @@ def create_file(metric: str, file_type: str, path: str) -> Path:
         FileExistsError: If file exists, prompt to overwrite. This exception won't be usually raised with name
             generation from the file naming scheme
     """
-
+    #? Unneeded?? I already pass in Path()
     path = Path(path)
 
     # Generate file name with this naming scheme: 
     # "mc_metric_log_yyyymmdd_HHMMSS.ext" e. g. "mc_telemetry_log_20260101_123030.log"
     file_name = (
-        f"mc_{metric}_log_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.{file_type}"
+        f"mc_{metric}_log_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.{file_ext}"
     )
 
+    # Get the absolute path of the file
     abs_file_path = (path / file_name).resolve()
 
     try:
@@ -397,7 +415,7 @@ def create_file(metric: str, file_type: str, path: str) -> Path:
     return abs_file_path
 
 def write_header(path, fieldnames: list) -> list[str]:
-    
+    """Write header to file. Timestamp collumn is already included."""
     with open(path, "w", newline="", encoding="utf-8") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=["timestamp", *fieldnames])
         writer.writeheader()
@@ -406,7 +424,7 @@ def write_header(path, fieldnames: list) -> list[str]:
 
 def write_line(data: dict, timestamp: str, path: Path) -> None:
     """
-    Append line to log file.
+    Convert line to ndjson and append to file.
 
     Args:
         data (dict): Key-value pairs.
@@ -452,7 +470,7 @@ async def idle(
     mc_logger: MeshCoreLogger,
     ) -> None:
     """
-    Disconnect while idle, wait until all requests are finished.
+    Disconnect and free used port after waiting for tasks to finish. Reconnect before next cycle.
 
     Args:
         mc (MeshCore): Connected MeshCore instance.
@@ -500,7 +518,7 @@ async def req_telemetry(
     completion_flag: asyncio.Event
     ) -> None:
     """
-    Periodically request telemetry from a contact and signal loop completion.
+    Periodically request telemetry from a contact and signal loop completion to idle() if enabled.
 
     Args:
         mc (MeshCore): Connected MeshCore instance.
@@ -761,6 +779,7 @@ async def node_login(
     contact: dict, 
     password: str, 
     ) -> EventType.LOGIN_SUCCESS | None:
+    """Attempt to login to target node, if login fails retry 3 times."""
 
     print("Logging in...")
 
@@ -788,6 +807,7 @@ async def node_login(
     return login
 
 async def node_logout(mc, contact: dict) -> EventType.ERROR | EventType.OK:
+    """Send logout to target node, if logout failed retry 3 times"""
 
     logout_event = EventType.ERROR
 
@@ -826,6 +846,7 @@ async def node_logout(mc, contact: dict) -> EventType.ERROR | EventType.OK:
 
 # * SEARCH CONTACTS
 async def search_contacts(mc, query: str) -> dict | None:
+    """Try to find target node in device contacts using advert name or public key prefix."""
 
     # Try to find contact by name and by pubkey prefix
     by_name = mc.get_contact_by_name(query)
